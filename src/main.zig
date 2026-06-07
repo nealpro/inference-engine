@@ -50,9 +50,10 @@ fn printUsage(io: Io, err: anyerror) !void {
     try stderr.writeAll(
         \\usage:
         \\  inference_engine --model <path-or-cache-alias> --prompt <text> [--tokenizer <path-or-dir>] [--ctx <tokens>] [--max-new-tokens <n>] [--decode ar|mtp|ssd-sim]
-        \\  inference_engine --validate-model --model <path-or-cache-alias> [--tokenizer <path-or-dir>]
+        \\  inference_engine --validate-model --model <path-or-cache-alias> [--tokenizer <path-or-dir>] [--artifact-revision <rev>]
         \\  inference_engine --benchmark-contract
         \\  inference_engine --benchmark-contract-json
+        \\  inference_engine --benchmark-report-json --model <path-or-cache-alias> [--tokenizer <path-or-dir>] [--artifact-revision <rev>]
         \\
         \\example:
         \\  inference_engine --model /path/to/model.gguf --ctx 8192 --decode ar --prompt "hello"

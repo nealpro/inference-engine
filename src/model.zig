@@ -67,6 +67,32 @@ pub const TensorInfo = struct {
     }
 };
 
+const Gemma4TextSpecValues = struct {
+    block_count: u32,
+    embedding_length: u32,
+    feed_forward_length: u32,
+    attention_head_count: u32,
+    attention_head_count_kv: u32,
+    vocab_size: u32,
+
+    fn fromSpec(spec: ModelSpec) ModelError!Gemma4TextSpecValues {
+        return .{
+            .block_count = spec.block_count orelse return error.MissingMetadata,
+            .embedding_length = spec.embedding_length orelse return error.MissingMetadata,
+            .feed_forward_length = spec.feed_forward_length orelse return error.MissingMetadata,
+            .attention_head_count = spec.attention_head_count orelse return error.MissingMetadata,
+            .attention_head_count_kv = spec.attention_head_count_kv orelse return error.MissingMetadata,
+            .vocab_size = spec.vocab_size orelse return error.MissingMetadata,
+        };
+    }
+
+    fn kvWidth(self: Gemma4TextSpecValues) ?u32 {
+        const product = std.math.mul(u32, self.embedding_length, self.attention_head_count_kv) catch return null;
+        if (self.attention_head_count == 0 or product % self.attention_head_count != 0) return null;
+        return product / self.attention_head_count;
+    }
+};
+
 pub const QuantizationSummary = struct {
     has_f32: bool = false,
     has_f16: bool = false,
@@ -139,6 +165,7 @@ pub const ModelSpec = struct {
 pub fn validateGemma4TextModel(spec: ModelSpec, tensors: []const TensorInfo) ModelError!void {
     try validateGemma4TextSpec(spec);
     try validateGemma4TextTensors(tensors);
+    try validateGemma4TextTensorShapes(spec, tensors);
 }
 
 pub fn validateGemma4TextSpec(spec: ModelSpec) ModelError!void {
@@ -175,6 +202,31 @@ pub fn validateGemma4TextTensors(tensors: []const TensorInfo) ModelError!void {
     }
 }
 
+fn validateGemma4TextTensorShapes(spec: ModelSpec, tensors: []const TensorInfo) ModelError!void {
+    const values = try Gemma4TextSpecValues.fromSpec(spec);
+
+    const embedding = tensorByName(tensors, "token_embd.weight") orelse return error.MissingTensor;
+    try expectMatrixContaining(embedding, values.vocab_size, values.embedding_length);
+
+    const output_norm = tensorByName(tensors, "output_norm.weight") orelse return error.MissingTensor;
+    try expectVector(output_norm, values.embedding_length);
+
+    const block_count = std.math.cast(usize, values.block_count) orelse return error.MalformedModel;
+    const kv_width = values.kvWidth();
+    var name_buf: [128]u8 = undefined;
+    for (0..block_count) |layer| {
+        try expectLayerVector(tensors, &name_buf, layer, "attn_norm.weight", values.embedding_length);
+        try expectLayerMatrixHiddenHidden(tensors, &name_buf, layer, "attn_q.weight", values.embedding_length);
+        try expectLayerKvMatrix(tensors, &name_buf, layer, "attn_k.weight", values.embedding_length, kv_width);
+        try expectLayerKvMatrix(tensors, &name_buf, layer, "attn_v.weight", values.embedding_length, kv_width);
+        try expectLayerMatrixHiddenHidden(tensors, &name_buf, layer, "attn_output.weight", values.embedding_length);
+        try expectLayerVector(tensors, &name_buf, layer, "ffn_norm.weight", values.embedding_length);
+        try expectLayerMatrixContaining(tensors, &name_buf, layer, "ffn_gate.weight", values.embedding_length, values.feed_forward_length);
+        try expectLayerMatrixContaining(tensors, &name_buf, layer, "ffn_up.weight", values.embedding_length, values.feed_forward_length);
+        try expectLayerMatrixContaining(tensors, &name_buf, layer, "ffn_down.weight", values.embedding_length, values.feed_forward_length);
+    }
+}
+
 fn hasTensor(tensors: []const TensorInfo, name: []const u8) bool {
     for (tensors) |tensor| {
         if (std.mem.eql(u8, tensor.name, name)) return true;
@@ -182,11 +234,80 @@ fn hasTensor(tensors: []const TensorInfo, name: []const u8) bool {
     return false;
 }
 
+fn tensorByName(tensors: []const TensorInfo, name: []const u8) ?TensorInfo {
+    for (tensors) |tensor| {
+        if (std.mem.eql(u8, tensor.name, name)) return tensor;
+    }
+    return null;
+}
+
 fn hasBlockTensorWithSuffix(tensors: []const TensorInfo, suffix: []const u8) bool {
     for (tensors) |tensor| {
         if (std.mem.startsWith(u8, tensor.name, "blk.") and std.mem.endsWith(u8, tensor.name, suffix)) {
             return true;
         }
+    }
+    return false;
+}
+
+fn layerTensorBySuffix(tensors: []const TensorInfo, name_buf: []u8, layer: usize, suffix: []const u8) ModelError!TensorInfo {
+    const name = std.fmt.bufPrint(name_buf, "blk.{d}.{s}", .{ layer, suffix }) catch return error.MalformedModel;
+    return tensorByName(tensors, name) orelse error.MissingTensor;
+}
+
+fn expectLayerVector(tensors: []const TensorInfo, name_buf: []u8, layer: usize, suffix: []const u8, expected: u32) ModelError!void {
+    try expectVector(try layerTensorBySuffix(tensors, name_buf, layer, suffix), expected);
+}
+
+fn expectLayerMatrixHiddenHidden(tensors: []const TensorInfo, name_buf: []u8, layer: usize, suffix: []const u8, hidden: u32) ModelError!void {
+    try expectMatrixExact(try layerTensorBySuffix(tensors, name_buf, layer, suffix), hidden, hidden);
+}
+
+fn expectLayerMatrixContaining(tensors: []const TensorInfo, name_buf: []u8, layer: usize, suffix: []const u8, a: u32, b: u32) ModelError!void {
+    try expectMatrixContaining(try layerTensorBySuffix(tensors, name_buf, layer, suffix), a, b);
+}
+
+fn expectLayerKvMatrix(
+    tensors: []const TensorInfo,
+    name_buf: []u8,
+    layer: usize,
+    suffix: []const u8,
+    hidden: u32,
+    kv_width: ?u32,
+) ModelError!void {
+    const tensor = try layerTensorBySuffix(tensors, name_buf, layer, suffix);
+    if (kv_width) |width| {
+        try expectMatrixContaining(tensor, hidden, width);
+    } else {
+        try expectMatrixWithDim(tensor, hidden);
+    }
+}
+
+fn expectVector(tensor: TensorInfo, len: u32) ModelError!void {
+    if (tensor.dims.len != 1 or tensor.dims[0] != len) return error.ShapeMismatch;
+}
+
+fn expectMatrixExact(tensor: TensorInfo, rows_or_cols_a: u32, rows_or_cols_b: u32) ModelError!void {
+    if (tensor.dims.len != 2) return error.ShapeMismatch;
+    const a = @as(u64, rows_or_cols_a);
+    const b = @as(u64, rows_or_cols_b);
+    if (!((tensor.dims[0] == a and tensor.dims[1] == b) or (tensor.dims[0] == b and tensor.dims[1] == a))) {
+        return error.ShapeMismatch;
+    }
+}
+
+fn expectMatrixContaining(tensor: TensorInfo, a: u32, b: u32) ModelError!void {
+    if (tensor.dims.len != 2) return error.ShapeMismatch;
+    if (!dimsContain(tensor.dims, a) or !dimsContain(tensor.dims, b)) return error.ShapeMismatch;
+}
+
+fn expectMatrixWithDim(tensor: TensorInfo, expected: u32) ModelError!void {
+    if (tensor.dims.len != 2 or !dimsContain(tensor.dims, expected)) return error.ShapeMismatch;
+}
+
+fn dimsContain(dims: []const u64, expected: u32) bool {
+    for (dims) |dim| {
+        if (dim == expected) return true;
     }
     return false;
 }
@@ -257,6 +378,84 @@ test "Gemma 4 text tensor validator checks required families" {
     try std.testing.expectError(error.MissingTensor, validateGemma4TextTensors(tensors[0 .. tensors.len - 1]));
 }
 
+test "Gemma 4 text model validator checks every layer and shapes" {
+    const tensors = [_]TensorInfo{
+        tensorInfoDims("token_embd.weight", &.{ 8, 4 }),
+        tensorInfoDims("output_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.attn_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.attn_q.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.0.attn_k.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.0.attn_v.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.0.attn_output.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.0.ffn_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.ffn_gate.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.0.ffn_up.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.0.ffn_down.weight", &.{ 4, 8 }),
+        tensorInfoDims("blk.1.attn_norm.weight", &.{4}),
+        tensorInfoDims("blk.1.attn_q.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.1.attn_k.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.1.attn_v.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.1.attn_output.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.1.ffn_norm.weight", &.{4}),
+        tensorInfoDims("blk.1.ffn_gate.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.1.ffn_up.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.1.ffn_down.weight", &.{ 4, 8 }),
+    };
+    try validateGemma4TextModel(validGemma4Spec(2), &tensors);
+
+    try std.testing.expectError(error.MissingTensor, validateGemma4TextModel(
+        validGemma4Spec(2),
+        tensors[0 .. tensors.len - 1],
+    ));
+}
+
+test "Gemma 4 text model validator rejects bad top-level and layer shapes" {
+    const bad_embedding = [_]TensorInfo{
+        tensorInfoDims("token_embd.weight", &.{ 8, 5 }),
+        tensorInfoDims("output_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.attn_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.attn_q.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.0.attn_k.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.0.attn_v.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.0.attn_output.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.0.ffn_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.ffn_gate.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.0.ffn_up.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.0.ffn_down.weight", &.{ 4, 8 }),
+    };
+    try std.testing.expectError(error.ShapeMismatch, validateGemma4TextModel(validGemma4Spec(1), &bad_embedding));
+
+    const bad_norm = [_]TensorInfo{
+        tensorInfoDims("token_embd.weight", &.{ 8, 4 }),
+        tensorInfoDims("output_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.attn_norm.weight", &.{ 4, 1 }),
+        tensorInfoDims("blk.0.attn_q.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.0.attn_k.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.0.attn_v.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.0.attn_output.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.0.ffn_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.ffn_gate.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.0.ffn_up.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.0.ffn_down.weight", &.{ 4, 8 }),
+    };
+    try std.testing.expectError(error.ShapeMismatch, validateGemma4TextModel(validGemma4Spec(1), &bad_norm));
+
+    const bad_ffn = [_]TensorInfo{
+        tensorInfoDims("token_embd.weight", &.{ 8, 4 }),
+        tensorInfoDims("output_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.attn_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.attn_q.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.0.attn_k.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.0.attn_v.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.0.attn_output.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.0.ffn_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.ffn_gate.weight", &.{ 7, 4 }),
+        tensorInfoDims("blk.0.ffn_up.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.0.ffn_down.weight", &.{ 4, 8 }),
+    };
+    try std.testing.expectError(error.ShapeMismatch, validateGemma4TextModel(validGemma4Spec(1), &bad_ffn));
+}
+
 fn tensorInfo(name: []const u8) TensorInfo {
     return .{
         .name = name,
@@ -264,5 +463,31 @@ fn tensorInfo(name: []const u8) TensorInfo {
         .kind = .q4_0,
         .offset = 0,
         .byte_len = 18,
+    };
+}
+
+fn tensorInfoDims(name: []const u8, dims: []const u64) TensorInfo {
+    return .{
+        .name = name,
+        .dims = dims,
+        .kind = .q4_0,
+        .offset = 0,
+        .byte_len = 18,
+    };
+}
+
+fn validGemma4Spec(block_count: u32) ModelSpec {
+    return .{
+        .architecture = "gemma4",
+        .context_length = 16,
+        .embedding_length = 4,
+        .block_count = block_count,
+        .feed_forward_length = 8,
+        .attention_head_count = 2,
+        .attention_head_count_kv = 1,
+        .rope_dimension_count = 2,
+        .vocab_size = 8,
+        .tensor_count = 2 + (@as(usize, block_count) * 9),
+        .quantization = .{ .has_q4_0 = true },
     };
 }

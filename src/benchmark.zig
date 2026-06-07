@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const model = @import("model.zig");
+
 pub const contract_version = "benchmark-contract-v1";
 pub const gemma4_integration_env = "INFERENCE_ENGINE_GEMMA4_DIR";
 
@@ -261,6 +263,106 @@ pub fn writeManifestJson(writer: anytype) !void {
     try writer.writeAll("}\n");
 }
 
+pub const ReportInput = struct {
+    model_path: []const u8,
+    model_source: []const u8,
+    artifact_sha256: []const u8,
+    artifact_revision: ?[]const u8,
+    artifact_revision_status: []const u8,
+    spec: model.ModelSpec,
+    tokenizer_kind: []const u8,
+    tokenizer_count: usize,
+    tokenizer_bos_id: ?u32,
+    tokenizer_eos_id: ?u32,
+    tokenizer_pad_id: ?u32,
+    chat_template_source: []const u8,
+    formatted_prompt_bytes: []const usize,
+};
+
+pub fn writeReportJson(writer: anytype, input: ReportInput) !void {
+    try writer.writeAll("{\n");
+    try writeJsonField(writer, 1, "version", contract_version, true);
+    try writeJsonField(writer, 1, "status", "validation_only", true);
+    try writeJsonField(writer, 1, "target_hf_repo", target_artifact.hf_repo, true);
+    try writeJsonField(writer, 1, "target_filename", target_artifact.filename, true);
+
+    try writer.writeAll("  \"artifact\": {\n");
+    try writeJsonField(writer, 2, "model_path", input.model_path, true);
+    try writeJsonField(writer, 2, "source", input.model_source, true);
+    try writeJsonField(writer, 2, "sha256", input.artifact_sha256, true);
+    try writeJsonOptionalStringField(writer, 2, "revision", input.artifact_revision, true);
+    try writeJsonField(writer, 2, "revision_status", input.artifact_revision_status, false);
+    try writer.writeAll("  },\n");
+
+    try writer.writeAll("  \"model\": {\n");
+    try writeJsonOptionalStringField(writer, 2, "name", input.spec.name, true);
+    try writeJsonField(writer, 2, "architecture", input.spec.architecture, true);
+    try writeJsonOptionalNumberField(writer, 2, "context_length", input.spec.context_length, true);
+    try writeJsonOptionalNumberField(writer, 2, "embedding_length", input.spec.embedding_length, true);
+    try writeJsonOptionalNumberField(writer, 2, "block_count", input.spec.block_count, true);
+    try writeJsonOptionalNumberField(writer, 2, "feed_forward_length", input.spec.feed_forward_length, true);
+    try writeJsonOptionalNumberField(writer, 2, "attention_head_count", input.spec.attention_head_count, true);
+    try writeJsonOptionalNumberField(writer, 2, "attention_head_count_kv", input.spec.attention_head_count_kv, true);
+    try writeJsonOptionalNumberField(writer, 2, "rope_dimension_count", input.spec.rope_dimension_count, true);
+    try writeJsonOptionalNumberField(writer, 2, "vocab_size", input.spec.vocab_size, true);
+    try writeJsonNumberField(writer, 2, "tensor_count", input.spec.tensor_count, true);
+    try writer.writeAll("    \"quantization\": {");
+    try writeJsonInlineBoolField(writer, "has_f32", input.spec.quantization.has_f32, true);
+    try writeJsonInlineBoolField(writer, "has_f16", input.spec.quantization.has_f16, true);
+    try writeJsonInlineBoolField(writer, "has_q4_0", input.spec.quantization.has_q4_0, true);
+    try writeJsonInlineBoolField(writer, "has_unknown", input.spec.quantization.has_unknown, false);
+    try writer.writeAll("}\n");
+    try writer.writeAll("  },\n");
+
+    try writer.writeAll("  \"tokenizer\": {\n");
+    try writeJsonField(writer, 2, "kind", input.tokenizer_kind, true);
+    try writeJsonNumberField(writer, 2, "token_count", input.tokenizer_count, true);
+    try writeJsonOptionalNumberField(writer, 2, "bos_id", input.tokenizer_bos_id, true);
+    try writeJsonOptionalNumberField(writer, 2, "eos_id", input.tokenizer_eos_id, true);
+    try writeJsonOptionalNumberField(writer, 2, "pad_id", input.tokenizer_pad_id, true);
+    try writeJsonField(writer, 2, "chat_template_source", input.chat_template_source, false);
+    try writer.writeAll("  },\n");
+
+    try writer.writeAll("  \"generation\": {\n");
+    try writeJsonNumberField(writer, 2, "max_new_tokens", output_policy.max_new_tokens, true);
+    try writeJsonNumberField(writer, 2, "min_required_new_tokens", output_policy.min_required_new_tokens, true);
+    try writeJsonBoolField(writer, 2, "stop_on_eos", output_policy.stop_on_eos, true);
+    try writeJsonBoolField(writer, 2, "early_eos_is_failure", output_policy.early_eos_is_failure, true);
+    try writeJsonFloatField(writer, 2, "temperature", generation_settings.temperature, true);
+    try writeJsonFloatField(writer, 2, "top_p", generation_settings.top_p, true);
+    try writeJsonNumberField(writer, 2, "top_k", generation_settings.top_k, true);
+    try writeJsonFloatField(writer, 2, "repeat_penalty", generation_settings.repeat_penalty, true);
+    try writeJsonNumberField(writer, 2, "seed", generation_settings.seed, true);
+    try writeJsonField(writer, 2, "sampling_policy", generation_settings.sampling_policy, false);
+    try writer.writeAll("  },\n");
+
+    try writer.writeAll("  \"prompts\": [\n");
+    for (prompt_suite, 0..) |case, index| {
+        try writer.writeAll("    {");
+        try writeJsonInlineField(writer, "id", case.id, true);
+        try writeJsonInlineField(writer, "category", case.category, true);
+        try writeJsonInlineField(writer, "prompt", case.prompt, true);
+        try writer.writeAll("\"formatted_prompt_bytes\": ");
+        const formatted_bytes = if (index < input.formatted_prompt_bytes.len) input.formatted_prompt_bytes[index] else 0;
+        try writer.print("{d}", .{formatted_bytes});
+        try writer.writeAll(if (index + 1 == prompt_suite.len) "}\n" else "},\n");
+    }
+    try writer.writeAll("  ],\n");
+
+    try writer.writeAll("  \"metrics\": [\n");
+    for (metrics, 0..) |metric, index| {
+        try writer.writeAll("    {");
+        try writeJsonInlineField(writer, "name", metric.name, true);
+        try writeJsonInlineField(writer, "unit", metric.unit, true);
+        try writeJsonInlineField(writer, "priority", @tagName(metric.priority), true);
+        try writeJsonInlineField(writer, "status", "not_run", true);
+        try writer.writeAll("\"value\": null");
+        try writer.writeAll(if (index + 1 == metrics.len) "}\n" else "},\n");
+    }
+    try writer.writeAll("  ]\n");
+    try writer.writeAll("}\n");
+}
+
 pub fn writeContract(writer: anytype) !void {
     try writer.print(
         \\benchmark contract
@@ -393,10 +495,40 @@ fn writeJsonBoolField(writer: anytype, indent: usize, key: []const u8, value: bo
     try writer.writeAll(if (comma) ",\n" else "\n");
 }
 
+fn writeJsonOptionalStringField(writer: anytype, indent: usize, key: []const u8, value: ?[]const u8, comma: bool) !void {
+    try writeIndent(writer, indent);
+    try writeJsonString(writer, key);
+    try writer.writeAll(": ");
+    if (value) |some| {
+        try writeJsonString(writer, some);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(if (comma) ",\n" else "\n");
+}
+
+fn writeJsonOptionalNumberField(writer: anytype, indent: usize, key: []const u8, value: anytype, comma: bool) !void {
+    try writeIndent(writer, indent);
+    try writeJsonString(writer, key);
+    try writer.writeAll(": ");
+    if (value) |some| {
+        try writer.print("{d}", .{some});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(if (comma) ",\n" else "\n");
+}
+
 fn writeJsonInlineField(writer: anytype, key: []const u8, value: []const u8, comma: bool) !void {
     try writeJsonString(writer, key);
     try writer.writeAll(": ");
     try writeJsonString(writer, value);
+    try writer.writeAll(if (comma) ", " else "");
+}
+
+fn writeJsonInlineBoolField(writer: anytype, key: []const u8, value: bool, comma: bool) !void {
+    try writeJsonString(writer, key);
+    try writer.writeAll(if (value) ": true" else ": false");
     try writer.writeAll(if (comma) ", " else "");
 }
 
@@ -489,4 +621,48 @@ test "benchmark contract writer prints MLX baseline" {
         out[0..writer.end],
         "python -m mlx_lm.generate",
     ) != null);
+}
+
+test "benchmark report json is validation-only and includes artifact identity" {
+    var out: [30000]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&out);
+    const spec = model.ModelSpec{
+        .name = "toy",
+        .architecture = "gemma4",
+        .context_length = 8,
+        .embedding_length = 2,
+        .block_count = 1,
+        .feed_forward_length = 4,
+        .attention_head_count = 1,
+        .attention_head_count_kv = 1,
+        .rope_dimension_count = 2,
+        .vocab_size = 3,
+        .tensor_count = 11,
+        .quantization = .{ .has_q4_0 = true },
+    };
+    const prompt_bytes = [_]usize{10} ** prompt_suite.len;
+
+    try writeReportJson(&writer, .{
+        .model_path = "/tmp/model.gguf",
+        .model_source = "exact",
+        .artifact_sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        .artifact_revision = null,
+        .artifact_revision_status = "missing",
+        .spec = spec,
+        .tokenizer_kind = "gguf_vocab",
+        .tokenizer_count = 3,
+        .tokenizer_bos_id = 0,
+        .tokenizer_eos_id = 1,
+        .tokenizer_pad_id = null,
+        .chat_template_source = "fallback",
+        .formatted_prompt_bytes = &prompt_bytes,
+    });
+
+    const json = out[0..writer.end];
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"status\": \"validation_only\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"sha256\": \"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"revision_status\": \"missing\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\": \"short_latency\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"status\": \"not_run\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"context_length\": 8") != null);
 }

@@ -1,5 +1,6 @@
 const std = @import("std");
 
+pub const artifact = @import("artifact.zig");
 pub const benchmark = @import("benchmark.zig");
 pub const cpu = @import("cpu.zig");
 pub const engine = @import("engine.zig");
@@ -14,6 +15,7 @@ pub const Engine = engine.Engine;
 pub const RunOptions = engine.RunOptions;
 
 test {
+    _ = artifact;
     _ = benchmark;
     _ = cpu;
     _ = engine;
