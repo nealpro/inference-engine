@@ -1,3 +1,7 @@
 .zig-cache/
 zig-out/
 .env*
+models/
+benchmarks/runs/
+*.gguf
+*.safetensors
