@@ -1,7 +1,10 @@
+//! GGUF metadata and tensor-directory parsing for model validation.
+
 const std = @import("std");
 
 const model = @import("model.zig");
 
+/// Errors returned while parsing GGUF metadata and tensor descriptors.
 pub const GgufError = error{
     BadMagic,
     UnsupportedVersion,
@@ -17,6 +20,7 @@ pub const GgufError = error{
 const max_string_len = 16 * 1024 * 1024;
 const default_alignment: u64 = 32;
 
+/// GGUF metadata value tags supported by the parser.
 pub const MetadataValueTag = enum(u32) {
     uint8 = 0,
     int8 = 1,
@@ -33,6 +37,7 @@ pub const MetadataValueTag = enum(u32) {
     float64 = 12,
 };
 
+/// Parsed GGUF metadata value.
 pub const MetadataValue = union(enum) {
     u32: u32,
     i32: i32,
@@ -44,6 +49,7 @@ pub const MetadataValue = union(enum) {
     u32_array: []const u32,
     unsupported: void,
 
+    /// Releases owned metadata value storage.
     pub fn deinit(self: MetadataValue, allocator: std.mem.Allocator) void {
         switch (self) {
             .string => |value| allocator.free(value),
@@ -57,16 +63,19 @@ pub const MetadataValue = union(enum) {
     }
 };
 
+/// Parsed GGUF metadata key/value entry.
 pub const MetadataEntry = struct {
     key: []const u8,
     value: MetadataValue,
 
+    /// Releases the owned key and value storage.
     pub fn deinit(self: MetadataEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.key);
         self.value.deinit(allocator);
     }
 };
 
+/// Owned GGUF header, metadata, and tensor directory.
 pub const ParsedGguf = struct {
     version: u32,
     alignment: u64,
@@ -74,6 +83,7 @@ pub const ParsedGguf = struct {
     metadata: []MetadataEntry,
     tensors: []model.TensorInfo,
 
+    /// Releases all owned parser output.
     pub fn deinit(self: ParsedGguf, allocator: std.mem.Allocator) void {
         for (self.metadata) |entry| entry.deinit(allocator);
         allocator.free(self.metadata);
@@ -81,6 +91,7 @@ pub const ParsedGguf = struct {
         allocator.free(self.tensors);
     }
 
+    /// Returns a string metadata value by key when present.
     pub fn metadataString(self: ParsedGguf, key: []const u8) ?[]const u8 {
         for (self.metadata) |entry| {
             if (std.mem.eql(u8, entry.key, key)) {
@@ -93,6 +104,7 @@ pub const ParsedGguf = struct {
         return null;
     }
 
+    /// Returns an integer metadata value by key when representable as u32.
     pub fn metadataU32(self: ParsedGguf, key: []const u8) ?u32 {
         for (self.metadata) |entry| {
             if (std.mem.eql(u8, entry.key, key)) {
@@ -107,6 +119,7 @@ pub const ParsedGguf = struct {
         return null;
     }
 
+    /// Returns a string-array metadata value by key when present.
     pub fn metadataStringArray(self: ParsedGguf, key: []const u8) ?[]const []const u8 {
         for (self.metadata) |entry| {
             if (std.mem.eql(u8, entry.key, key)) {
@@ -119,6 +132,7 @@ pub const ParsedGguf = struct {
         return null;
     }
 
+    /// Finds a tensor descriptor by exact tensor name.
     pub fn tensorByName(self: ParsedGguf, name: []const u8) ?model.TensorInfo {
         for (self.tensors) |tensor| {
             if (std.mem.eql(u8, tensor.name, name)) return tensor;
@@ -126,6 +140,7 @@ pub const ParsedGguf = struct {
         return null;
     }
 
+    /// Builds model-level metadata from GGUF metadata and tensor descriptors.
     pub fn buildModelSpec(self: ParsedGguf, allocator: std.mem.Allocator) !model.ModelSpec {
         const architecture = self.metadataString("general.architecture") orelse return error.MissingMetadata;
         const arch_owned = try allocator.dupe(u8, architecture);
@@ -181,11 +196,13 @@ pub const ParsedGguf = struct {
     }
 };
 
+/// Parses a complete GGUF byte slice.
 pub fn parseFromSlice(allocator: std.mem.Allocator, bytes: []const u8) !ParsedGguf {
     var reader = std.Io.Reader.fixed(bytes);
     return parse(allocator, &reader, bytes.len);
 }
 
+/// Parses GGUF metadata and tensor descriptors from a filesystem path.
 pub fn parseFromPath(
     allocator: std.mem.Allocator,
     io: std.Io,

@@ -1,8 +1,11 @@
+//! Command-line entry point for the inference engine scaffold.
+
 const std = @import("std");
 const Io = std.Io;
 
 const inference = @import("inference_engine");
 
+/// Parses CLI options, dispatches benchmark output, or runs validation.
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);

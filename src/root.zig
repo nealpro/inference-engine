@@ -1,17 +1,31 @@
+//! Public library surface for the local inference engine scaffold.
+
 const std = @import("std");
 
+/// Artifact identity helpers.
 pub const artifact = @import("artifact.zig");
+/// Benchmark contract and report writers.
 pub const benchmark = @import("benchmark.zig");
+/// Fixture-backed CPU reference kernels.
 pub const cpu = @import("cpu.zig");
+/// CLI options and top-level engine orchestration.
 pub const engine = @import("engine.zig");
+/// GGUF metadata and tensor directory parser.
 pub const gguf = @import("gguf.zig");
+/// Model metadata and Gemma 4 validation helpers.
 pub const model = @import("model.zig");
+/// Model path and cache alias resolution.
 pub const resolver = @import("resolver.zig");
+/// Sampling configuration and placeholder generation.
 pub const sampler = @import("sampler.zig");
+/// Tokenizer adapters used by validation and tests.
 pub const tokenizer = @import("tokenizer.zig");
 
+/// Decode mode selected by the CLI.
 pub const DecodeMode = engine.DecodeMode;
+/// Top-level engine facade.
 pub const Engine = engine.Engine;
+/// Parsed CLI options for a run.
 pub const RunOptions = engine.RunOptions;
 
 test {

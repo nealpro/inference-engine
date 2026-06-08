@@ -1,10 +1,15 @@
+//! Benchmark contract data and report writers for repeatable comparisons.
+
 const std = @import("std");
 
 const model = @import("model.zig");
 
+/// Stable identifier for the current benchmark contract shape.
 pub const contract_version = "benchmark-contract-v1";
+/// Environment variable used by integration scripts to locate Gemma artifacts.
 pub const gemma4_integration_env = "INFERENCE_ENGINE_GEMMA4_DIR";
 
+/// Immutable target artifact policy for this engine milestone.
 pub const TargetArtifact = struct {
     hf_repo: []const u8,
     filename: []const u8,
@@ -14,6 +19,7 @@ pub const TargetArtifact = struct {
     text_only_policy: []const u8,
 };
 
+/// Official Gemma 4 QAT Q4_0 GGUF target used by the contract.
 pub const target_artifact = TargetArtifact{
     .hf_repo = "google/gemma-4-12B-it-qat-q4_0-gguf",
     .filename = "gemma-4-12b-it-qat-q4_0.gguf",
@@ -23,6 +29,7 @@ pub const target_artifact = TargetArtifact{
     .text_only_policy = "text-only inference target; reject mmproj projector GGUF files",
 };
 
+/// Model lineage rules shared by this engine and the MLX baseline.
 pub const ModelLineage = struct {
     model_source_policy: []const u8,
     engine_artifact_policy: []const u8,
@@ -34,6 +41,7 @@ pub const ModelLineage = struct {
     chat_template_policy: []const u8,
 };
 
+/// Fixed model lineage policy for benchmarkable runs.
 pub const model_lineage = ModelLineage{
     .model_source_policy = "official Gemma 4 12B instruction-tuned QAT Q4_0 GGUF target",
     .engine_artifact_policy = "local GGUF path supplied by --model; default target is google/gemma-4-12B-it-qat-q4_0-gguf/gemma-4-12b-it-qat-q4_0.gguf",
@@ -45,6 +53,7 @@ pub const model_lineage = ModelLineage{
     .chat_template_policy = "single user message, no system message, reference chat template, add generation prompt",
 };
 
+/// Output length and stop behavior for deterministic benchmark runs.
 pub const OutputPolicy = struct {
     max_new_tokens: u32,
     min_required_new_tokens: u32,
@@ -52,6 +61,7 @@ pub const OutputPolicy = struct {
     early_eos_is_failure: bool,
 };
 
+/// Contract v1 output policy.
 pub const output_policy = OutputPolicy{
     .max_new_tokens = 128,
     .min_required_new_tokens = 16,
@@ -59,6 +69,7 @@ pub const output_policy = OutputPolicy{
     .early_eos_is_failure = true,
 };
 
+/// Deterministic generation settings for benchmark comparisons.
 pub const GenerationSettings = struct {
     temperature: f32,
     top_p: f32,
@@ -68,6 +79,7 @@ pub const GenerationSettings = struct {
     sampling_policy: []const u8,
 };
 
+/// Contract v1 generation settings.
 pub const generation_settings = GenerationSettings{
     .temperature = 0.0,
     .top_p = 1.0,
@@ -77,12 +89,14 @@ pub const generation_settings = GenerationSettings{
     .sampling_policy = "greedy argmax; no random sampling",
 };
 
+/// One prompt in the fixed benchmark suite.
 pub const PromptCase = struct {
     id: []const u8,
     category: []const u8,
     prompt: []const u8,
 };
 
+/// Fixed prompt suite used for reproducible latency comparisons.
 pub const prompt_suite = [_]PromptCase{
     .{
         .id = "short_latency",
@@ -120,11 +134,13 @@ pub const prompt_suite = [_]PromptCase{
     },
 };
 
+/// Relative importance of a reported benchmark metric.
 pub const MetricPriority = enum {
     primary,
     secondary,
 };
 
+/// Metric definition emitted by contract and report writers.
 pub const Metric = struct {
     name: []const u8,
     unit: []const u8,
@@ -132,6 +148,7 @@ pub const Metric = struct {
     description: []const u8,
 };
 
+/// Metrics tracked by benchmark contract v1.
 pub const metrics = [_]Metric{
     .{
         .name = "time_to_first_token",
@@ -171,6 +188,7 @@ pub const metrics = [_]Metric{
     },
 };
 
+/// MLX baseline command and environment capture policy.
 pub const MlxBaseline = struct {
     model_dir_env: []const u8,
     prompt_file_env: []const u8,
@@ -180,6 +198,7 @@ pub const MlxBaseline = struct {
     environment_commands: []const []const u8,
 };
 
+/// Baseline policy used when this engine is compared with MLX.
 pub const mlx_baseline = MlxBaseline{
     .model_dir_env = "MLX_MODEL_DIR",
     .prompt_file_env = "PROMPT_FILE",
@@ -197,6 +216,7 @@ pub const mlx_baseline = MlxBaseline{
     },
 };
 
+/// Finds a prompt case by stable id.
 pub fn promptById(id: []const u8) ?PromptCase {
     for (prompt_suite) |case| {
         if (std.mem.eql(u8, case.id, id)) return case;
@@ -204,6 +224,7 @@ pub fn promptById(id: []const u8) ?PromptCase {
     return null;
 }
 
+/// Writes the benchmark contract as a JSON manifest.
 pub fn writeManifestJson(writer: anytype) !void {
     try writer.writeAll("{\n");
     try writeJsonField(writer, 1, "version", contract_version, true);
@@ -263,6 +284,7 @@ pub fn writeManifestJson(writer: anytype) !void {
     try writer.writeAll("}\n");
 }
 
+/// Inputs captured in the validation-only benchmark report.
 pub const ReportInput = struct {
     model_path: []const u8,
     model_source: []const u8,
@@ -279,6 +301,7 @@ pub const ReportInput = struct {
     formatted_prompt_bytes: []const usize,
 };
 
+/// Writes the validation-only benchmark report JSON skeleton.
 pub fn writeReportJson(writer: anytype, input: ReportInput) !void {
     try writer.writeAll("{\n");
     try writeJsonField(writer, 1, "version", contract_version, true);
@@ -363,6 +386,7 @@ pub fn writeReportJson(writer: anytype, input: ReportInput) !void {
     try writer.writeAll("}\n");
 }
 
+/// Writes the human-readable benchmark contract.
 pub fn writeContract(writer: anytype) !void {
     try writer.print(
         \\benchmark contract

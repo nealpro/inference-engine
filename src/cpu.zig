@@ -1,11 +1,15 @@
+//! Fixture-backed CPU kernels and tiny reference model for correctness tests.
+
 const std = @import("std");
 
+/// Errors returned by CPU reference kernels.
 pub const CpuError = error{
     ContextOverflow,
     DimensionMismatch,
     InvalidToken,
 };
 
+/// Dequantizes one GGML Q4_0 block into 32 f32 values.
 pub fn dequantizeQ4_0Block(out: *[32]f32, block: *const [18]u8) void {
     const scale_bits = std.mem.readInt(u16, block[0..2], .little);
     const scale: f16 = @bitCast(scale_bits);
@@ -20,6 +24,7 @@ pub fn dequantizeQ4_0Block(out: *[32]f32, block: *const [18]u8) void {
     }
 }
 
+/// Computes a row-major matrix-vector product.
 pub fn matVec(out: []f32, matrix: []const f32, rows: usize, cols: usize, input: []const f32) CpuError!void {
     if (out.len != rows or input.len != cols or matrix.len != rows * cols) return error.DimensionMismatch;
     for (0..rows) |row| {
@@ -31,6 +36,7 @@ pub fn matVec(out: []f32, matrix: []const f32, rows: usize, cols: usize, input: 
     }
 }
 
+/// Applies RMSNorm with an explicit weight vector and epsilon.
 pub fn rmsNorm(out: []f32, input: []const f32, weight: []const f32, eps: f32) CpuError!void {
     if (out.len != input.len or weight.len != input.len) return error.DimensionMismatch;
     var mean_square: f32 = 0.0;
@@ -42,6 +48,7 @@ pub fn rmsNorm(out: []f32, input: []const f32, weight: []const f32, eps: f32) Cp
     }
 }
 
+/// Applies rotary position embedding in place to paired values.
 pub fn applyRoPE(values: []f32, position: usize, theta: f32) CpuError!void {
     if (values.len % 2 != 0) return error.DimensionMismatch;
     for (0..values.len / 2) |i| {
@@ -57,6 +64,7 @@ pub fn applyRoPE(values: []f32, position: usize, theta: f32) CpuError!void {
     }
 }
 
+/// Normalizes logits in place with a numerically stable softmax.
 pub fn softmax(values: []f32) void {
     if (values.len == 0) return;
     var max_value = values[0];
@@ -69,6 +77,7 @@ pub fn softmax(values: []f32) void {
     for (values) |*value| value.* /= sum;
 }
 
+/// Returns the index of the largest value.
 pub fn argmax(values: []const f32) u32 {
     var best_index: usize = 0;
     var best_value = values[0];
@@ -81,6 +90,7 @@ pub fn argmax(values: []const f32) u32 {
     return @intCast(best_index);
 }
 
+/// Simple owned KV cache used by the CPU reference path.
 pub const KVCache = struct {
     layer_count: usize,
     context_length: usize,
@@ -89,6 +99,7 @@ pub const KVCache = struct {
     values: []f32,
     used: usize = 0,
 
+    /// Allocates zeroed key and value storage.
     pub fn init(allocator: std.mem.Allocator, layer_count: usize, context_length: usize, hidden_size: usize) !KVCache {
         const total = try std.math.mul(usize, try std.math.mul(usize, layer_count, context_length), hidden_size);
         const keys = try allocator.alloc(f32, total);
@@ -105,11 +116,13 @@ pub const KVCache = struct {
         };
     }
 
+    /// Releases key and value storage.
     pub fn deinit(self: KVCache, allocator: std.mem.Allocator) void {
         allocator.free(self.keys);
         allocator.free(self.values);
     }
 
+    /// Stores one layer-position key/value pair.
     pub fn append(self: *KVCache, layer: usize, position: usize, key: []const f32, value: []const f32) CpuError!void {
         if (layer >= self.layer_count or position >= self.context_length) return error.ContextOverflow;
         if (key.len != self.hidden_size or value.len != self.hidden_size) return error.DimensionMismatch;
@@ -119,11 +132,13 @@ pub const KVCache = struct {
         self.used = @max(self.used, position + 1);
     }
 
+    /// Returns the key slice for one layer-position slot.
     pub fn keyAt(self: KVCache, layer: usize, position: usize) []const f32 {
         const start = self.index(layer, position);
         return self.keys[start .. start + self.hidden_size];
     }
 
+    /// Returns the value slice for one layer-position slot.
     pub fn valueAt(self: KVCache, layer: usize, position: usize) []const f32 {
         const start = self.index(layer, position);
         return self.values[start .. start + self.hidden_size];
@@ -134,6 +149,7 @@ pub const KVCache = struct {
     }
 };
 
+/// Shape and numeric constants for the tiny CPU reference model.
 pub const ReferenceConfig = struct {
     vocab_size: usize,
     hidden_size: usize,
@@ -144,6 +160,7 @@ pub const ReferenceConfig = struct {
     rms_eps: f32 = 1e-5,
 };
 
+/// Flat weight buffers consumed by the tiny CPU reference model.
 pub const ReferenceWeights = struct {
     token_embedding: []const f32,
     attn_norm: []const f32,
@@ -158,10 +175,12 @@ pub const ReferenceWeights = struct {
     lm_head: []const f32,
 };
 
+/// Tiny autoregressive CPU reference model for fixture tests.
 pub const ReferenceModel = struct {
     config: ReferenceConfig,
     weights: ReferenceWeights,
 
+    /// Generates deterministic token ids with greedy argmax sampling.
     pub fn generate(
         self: ReferenceModel,
         allocator: std.mem.Allocator,

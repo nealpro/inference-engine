@@ -1,7 +1,10 @@
+//! Tokenizer adapters used for validation, fixtures, and prompt formatting.
+
 const std = @import("std");
 
 const gguf = @import("gguf.zig");
 
+/// Errors returned by tokenizer loading and token conversion.
 pub const TokenizerError = error{
     MissingTokenizer,
     UnsupportedTokenizer,
@@ -9,6 +12,7 @@ pub const TokenizerError = error{
     InvalidTokenId,
 };
 
+/// Owned tokenizer vocabulary and special-token metadata.
 pub const Tokenizer = struct {
     kind: Kind,
     tokens: []const []const u8,
@@ -17,6 +21,7 @@ pub const Tokenizer = struct {
     pad_id: ?u32 = null,
     chat_template: ?[]const u8 = null,
 
+    /// Tokenizer source or adapter kind.
     pub const Kind = enum {
         placeholder,
         word_level,
@@ -25,6 +30,7 @@ pub const Tokenizer = struct {
         gguf_vocab,
     };
 
+    /// Returns a tokenizer placeholder that cannot encode real text.
     pub fn placeholder() Tokenizer {
         return .{
             .kind = .placeholder,
@@ -32,12 +38,14 @@ pub const Tokenizer = struct {
         };
     }
 
+    /// Releases owned vocabulary and chat-template storage.
     pub fn deinit(self: Tokenizer, allocator: std.mem.Allocator) void {
         for (self.tokens) |token| allocator.free(token);
         allocator.free(self.tokens);
         if (self.chat_template) |template| allocator.free(template);
     }
 
+    /// Builds a tokenizer view from GGUF tokenizer metadata.
     pub fn fromGguf(allocator: std.mem.Allocator, parsed: gguf.ParsedGguf) !Tokenizer {
         const tokens = parsed.metadataStringArray("tokenizer.ggml.tokens") orelse return error.MissingTokenizer;
         var owned = try allocator.alloc([]const u8, tokens.len);
@@ -64,6 +72,7 @@ pub const Tokenizer = struct {
         };
     }
 
+    /// Loads a small reference tokenizer from tokenizer.json bytes.
     pub fn fromJsonSlice(allocator: std.mem.Allocator, bytes: []const u8) !Tokenizer {
         var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
         defer parsed.deinit();
@@ -104,10 +113,12 @@ pub const Tokenizer = struct {
         };
     }
 
+    /// Counts raw prompt bytes for the current scaffold.
     pub fn countPromptBytes(_: Tokenizer, prompt: []const u8) usize {
         return prompt.len;
     }
 
+    /// Encodes text with a simple longest-token match over the loaded vocab.
     pub fn encode(self: Tokenizer, allocator: std.mem.Allocator, text: []const u8) ![]u32 {
         if (self.kind == .placeholder) return error.UnsupportedTokenizer;
 
@@ -141,6 +152,7 @@ pub const Tokenizer = struct {
         return ids.toOwnedSlice(allocator);
     }
 
+    /// Decodes token ids by concatenating their vocabulary entries.
     pub fn decode(self: Tokenizer, allocator: std.mem.Allocator, ids: []const u32) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
@@ -152,6 +164,7 @@ pub const Tokenizer = struct {
         return out.toOwnedSlice(allocator);
     }
 
+    /// Applies the current single-user Gemma chat-template fallback.
     pub fn applySingleUserChatTemplate(
         self: Tokenizer,
         allocator: std.mem.Allocator,

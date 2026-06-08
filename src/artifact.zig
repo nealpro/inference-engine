@@ -1,8 +1,13 @@
+//! Artifact identity helpers for benchmarkable model runs.
+
 const std = @import("std");
 
+/// Number of lowercase hexadecimal bytes in a SHA-256 digest.
 pub const sha256_hex_len = std.crypto.hash.sha2.Sha256.digest_length * 2;
+/// Fixed-size lowercase SHA-256 digest string.
 pub const Sha256Hex = [sha256_hex_len]u8;
 
+/// Computes the lowercase SHA-256 digest for a file path.
 pub fn sha256FileHex(io: std.Io, path: []const u8) !Sha256Hex {
     var file = if (std.Io.Dir.path.isAbsolute(path))
         try std.Io.Dir.openFileAbsolute(io, path, .{})

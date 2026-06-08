@@ -1,7 +1,10 @@
+//! Resolves model paths, directories, and local cache aliases.
+
 const std = @import("std");
 
 const benchmark = @import("benchmark.zig");
 
+/// Errors returned while locating a text GGUF model artifact.
 pub const ResolveError = error{
     MissingModelPath,
     ModelNotFound,
@@ -10,34 +13,40 @@ pub const ResolveError = error{
     ProjectorModelNotSupported,
 };
 
+/// Environment inputs used for cache resolution.
 pub const Env = struct {
     model_cache: ?[]const u8 = null,
     home: ?[]const u8 = null,
 };
 
+/// Owned result of resolving a model argument.
 pub const ResolvedModel = struct {
     model_path: []const u8,
     tokenizer_path: ?[]const u8,
     source: Source,
 
+    /// Describes how the model path was resolved.
     pub const Source = enum {
         exact,
         directory,
         cache_alias,
     };
 
+    /// Releases owned paths in the resolution result.
     pub fn deinit(self: ResolvedModel, allocator: std.mem.Allocator) void {
         allocator.free(self.model_path);
         if (self.tokenizer_path) |path| allocator.free(path);
     }
 };
 
+/// Returns the configured model cache root or the default under HOME.
 pub fn defaultCacheRoot(allocator: std.mem.Allocator, env: Env) ![]const u8 {
     if (env.model_cache) |cache| return allocator.dupe(u8, cache);
     if (env.home) |home| return std.Io.Dir.path.join(allocator, &.{ home, ".cache", "inference-engine", "models" });
     return error.MissingModelPath;
 }
 
+/// Resolves a model CLI argument to a concrete GGUF file path.
 pub fn resolve(
     allocator: std.mem.Allocator,
     io: std.Io,

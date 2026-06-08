@@ -33,6 +33,18 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the inference engine scaffold");
     run_step.dependOn(&run_cmd.step);
 
+    const docs_obj = b.addObject(.{
+        .name = "inference_engine_docs",
+        .root_module = lib_mod,
+    });
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = docs_obj.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    const docs_step = b.step("docs", "Generate API docs into zig-out/docs");
+    docs_step.dependOn(&install_docs.step);
+
     const lib_tests = b.addTest(.{
         .root_module = lib_mod,
     });

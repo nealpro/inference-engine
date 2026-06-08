@@ -1,3 +1,5 @@
+//! CLI parsing and top-level orchestration for validation and reports.
+
 const std = @import("std");
 
 const artifact = @import("artifact.zig");
@@ -7,6 +9,7 @@ const model = @import("model.zig");
 const resolver = @import("resolver.zig");
 const tokenizer = @import("tokenizer.zig");
 
+/// Errors returned while parsing command-line options.
 pub const CliError = error{
     MissingPrompt,
     MissingModelPath,
@@ -19,6 +22,7 @@ pub const CliError = error{
     InvalidArtifactRevision,
 };
 
+/// Runtime errors that can be surfaced by the engine entry points.
 pub const RuntimeError = error{
     MissingModelPath,
     ModelNotFound,
@@ -55,11 +59,13 @@ pub const RuntimeError = error{
     Unseekable,
 };
 
+/// Decode mode requested for generation.
 pub const DecodeMode = enum {
     ar,
     mtp,
     ssd_sim,
 
+    /// Parses the CLI spelling for a decode mode.
     pub fn parse(value: []const u8) CliError!DecodeMode {
         if (std.mem.eql(u8, value, "ar")) return .ar;
         if (std.mem.eql(u8, value, "mtp")) return .mtp;
@@ -67,6 +73,7 @@ pub const DecodeMode = enum {
         return error.UnknownDecodeMode;
     }
 
+    /// Returns the CLI label for this decode mode.
     pub fn label(self: DecodeMode) []const u8 {
         return switch (self) {
             .ar => "ar",
@@ -76,6 +83,7 @@ pub const DecodeMode = enum {
     }
 };
 
+/// Parsed options for one CLI run.
 pub const RunOptions = struct {
     model_path: ?[]const u8 = null,
     tokenizer_path: ?[]const u8 = null,
@@ -89,6 +97,7 @@ pub const RunOptions = struct {
     show_benchmark_report_json: bool = false,
     validate_model: bool = false,
 
+    /// Parses CLI arguments after the executable name.
     pub fn parse(args: []const []const u8) CliError!RunOptions {
         var opts = RunOptions{};
         var saw_prompt = false;
@@ -165,11 +174,14 @@ fn parseArtifactRevision(value: []const u8) CliError![]const u8 {
     return value;
 }
 
+/// Facade for validation, report generation, and future model execution.
 pub const Engine = struct {
+    /// Creates a stateless engine value.
     pub fn init() Engine {
         return .{};
     }
 
+    /// Runs the requested CLI action.
     pub fn run(
         self: Engine,
         allocator: std.mem.Allocator,
@@ -194,6 +206,7 @@ pub const Engine = struct {
         return error.RealModelCpuExecutionNotImplemented;
     }
 
+    /// Validates model artifact identity, metadata, tensors, and tokenizer data.
     pub fn validateModel(
         self: Engine,
         allocator: std.mem.Allocator,
@@ -251,6 +264,7 @@ pub const Engine = struct {
         if (ctx.resolved.tokenizer_path) |path| try writer.print("tokenizer-path: {s}\n", .{path});
     }
 
+    /// Writes the validation-only benchmark report JSON skeleton.
     pub fn writeBenchmarkReportJson(
         self: Engine,
         allocator: std.mem.Allocator,

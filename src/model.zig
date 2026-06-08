@@ -1,7 +1,11 @@
+//! Model metadata, tensor descriptors, and Gemma 4 text validation.
+
 const std = @import("std");
 
+/// GGUF architecture prefix accepted by the current Gemma 4 target.
 pub const target_architecture_prefix = "gemma4";
 
+/// Errors returned by model metadata and tensor validation.
 pub const ModelError = error{
     MissingModelPath,
     MissingMetadata,
@@ -12,12 +16,14 @@ pub const ModelError = error{
     ShapeMismatch,
 };
 
+/// GGML tensor storage kinds recognized by the current loader.
 pub const QuantizationType = enum {
     f32,
     f16,
     q4_0,
     unknown,
 
+    /// Converts a GGML type id to the local quantization enum.
     pub fn fromGgmlType(value: u32) QuantizationType {
         return switch (value) {
             0 => .f32,
@@ -27,6 +33,7 @@ pub const QuantizationType = enum {
         };
     }
 
+    /// Returns the user-facing label for this quantization kind.
     pub fn label(self: QuantizationType) []const u8 {
         return switch (self) {
             .f32 => "F32",
@@ -36,6 +43,7 @@ pub const QuantizationType = enum {
         };
     }
 
+    /// True when the tensor kind can be represented by this scaffold.
     pub fn isSupported(self: QuantizationType) bool {
         return switch (self) {
             .f32, .f16, .q4_0 => true,
@@ -44,6 +52,7 @@ pub const QuantizationType = enum {
     }
 };
 
+/// GGUF tensor directory entry with owned name and shape slices.
 pub const TensorInfo = struct {
     name: []const u8,
     dims: []const u64,
@@ -51,11 +60,13 @@ pub const TensorInfo = struct {
     offset: u64,
     byte_len: u64,
 
+    /// Releases owned tensor metadata.
     pub fn deinit(self: TensorInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.dims);
     }
 
+    /// Returns the checked product of all tensor dimensions.
     pub fn elementCount(self: TensorInfo) ModelError!u64 {
         var total: u64 = 1;
         if (self.dims.len == 0) return error.MalformedModel;
@@ -93,12 +104,14 @@ const Gemma4TextSpecValues = struct {
     }
 };
 
+/// Summary of tensor quantization kinds present in a model.
 pub const QuantizationSummary = struct {
     has_f32: bool = false,
     has_f16: bool = false,
     has_q4_0: bool = false,
     has_unknown: bool = false,
 
+    /// Records one tensor kind in the summary.
     pub fn observe(self: *QuantizationSummary, kind: QuantizationType) void {
         switch (kind) {
             .f32 => self.has_f32 = true,
@@ -108,6 +121,7 @@ pub const QuantizationSummary = struct {
         }
     }
 
+    /// Writes a compact comma-separated quantization summary.
     pub fn write(self: QuantizationSummary, writer: anytype) !void {
         var wrote = false;
         if (self.has_f32) {
@@ -133,6 +147,7 @@ pub const QuantizationSummary = struct {
     }
 };
 
+/// Model-level metadata required before Gemma 4 text inference can run.
 pub const ModelSpec = struct {
     name: ?[]const u8 = null,
     architecture: []const u8,
@@ -147,11 +162,13 @@ pub const ModelSpec = struct {
     tensor_count: usize,
     quantization: QuantizationSummary,
 
+    /// Releases owned metadata strings.
     pub fn deinit(self: ModelSpec, allocator: std.mem.Allocator) void {
         if (self.name) |name| allocator.free(name);
         allocator.free(self.architecture);
     }
 
+    /// Checks the generic text-inference metadata requirements.
     pub fn validateForTextInference(self: ModelSpec) ModelError!void {
         if (self.architecture.len == 0) return error.MissingMetadata;
         if (self.tensor_count == 0) return error.MissingTensor;
@@ -162,12 +179,14 @@ pub const ModelSpec = struct {
     }
 };
 
+/// Validates Gemma 4 text metadata and required tensor families.
 pub fn validateGemma4TextModel(spec: ModelSpec, tensors: []const TensorInfo) ModelError!void {
     try validateGemma4TextSpec(spec);
     try validateGemma4TextTensors(tensors);
     try validateGemma4TextTensorShapes(spec, tensors);
 }
 
+/// Validates Gemma 4 text model-level metadata.
 pub fn validateGemma4TextSpec(spec: ModelSpec) ModelError!void {
     try spec.validateForTextInference();
 
@@ -182,6 +201,7 @@ pub fn validateGemma4TextSpec(spec: ModelSpec) ModelError!void {
     if (!spec.quantization.has_q4_0) return error.UnsupportedQuantization;
 }
 
+/// Validates that required Gemma 4 text tensor families are present.
 pub fn validateGemma4TextTensors(tensors: []const TensorInfo) ModelError!void {
     if (!hasTensor(tensors, "token_embd.weight")) return error.MissingTensor;
     if (!hasTensor(tensors, "output_norm.weight")) return error.MissingTensor;
@@ -312,6 +332,7 @@ fn dimsContain(dims: []const u64, expected: u32) bool {
     return false;
 }
 
+/// Returns the byte length for a tensor with the given kind and element count.
 pub fn tensorByteLen(kind: QuantizationType, element_count: u64) ModelError!u64 {
     return switch (kind) {
         .f32 => std.math.mul(u64, element_count, 4) catch error.MalformedModel,
