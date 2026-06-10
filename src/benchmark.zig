@@ -218,7 +218,7 @@ pub const mlx_baseline = MlxBaseline{
 
 /// Finds a prompt case by stable id.
 pub fn promptById(id: []const u8) ?PromptCase {
-    for (prompt_suite) |case| {
+    inline for (prompt_suite) |case| {
         if (std.mem.eql(u8, case.id, id)) return case;
     }
     return null;
@@ -227,28 +227,22 @@ pub fn promptById(id: []const u8) ?PromptCase {
 /// Writes the benchmark contract as a JSON manifest.
 pub fn writeManifestJson(writer: anytype) !void {
     try writer.writeAll("{\n");
-    try writeJsonField(writer, 1, "version", contract_version, true);
-    try writeJsonField(writer, 1, "target_hf_repo", target_artifact.hf_repo, true);
-    try writeJsonField(writer, 1, "target_filename", target_artifact.filename, true);
-    try writeJsonField(writer, 1, "target_tokenizer_source", target_artifact.tokenizer_source, true);
-    try writeJsonField(writer, 1, "target_revision_policy", target_artifact.revision_policy, true);
-    try writeJsonField(writer, 1, "target_artifact_hash_policy", target_artifact.artifact_hash_policy, true);
-    try writeJsonField(writer, 1, "target_text_only_policy", target_artifact.text_only_policy, true);
+    try writeJsonStringFields(writer, 1, .{
+        .{ "version", contract_version },
+        .{ "target_hf_repo", target_artifact.hf_repo },
+        .{ "target_filename", target_artifact.filename },
+        .{ "target_tokenizer_source", target_artifact.tokenizer_source },
+        .{ "target_revision_policy", target_artifact.revision_policy },
+        .{ "target_artifact_hash_policy", target_artifact.artifact_hash_policy },
+        .{ "target_text_only_policy", target_artifact.text_only_policy },
+    }, true);
+
     try writer.writeAll("  \"generation\": {\n");
-    try writeJsonNumberField(writer, 2, "max_new_tokens", output_policy.max_new_tokens, true);
-    try writeJsonNumberField(writer, 2, "min_required_new_tokens", output_policy.min_required_new_tokens, true);
-    try writeJsonBoolField(writer, 2, "stop_on_eos", output_policy.stop_on_eos, true);
-    try writeJsonBoolField(writer, 2, "early_eos_is_failure", output_policy.early_eos_is_failure, true);
-    try writeJsonFloatField(writer, 2, "temperature", generation_settings.temperature, true);
-    try writeJsonFloatField(writer, 2, "top_p", generation_settings.top_p, true);
-    try writeJsonNumberField(writer, 2, "top_k", generation_settings.top_k, true);
-    try writeJsonFloatField(writer, 2, "repeat_penalty", generation_settings.repeat_penalty, true);
-    try writeJsonNumberField(writer, 2, "seed", generation_settings.seed, true);
-    try writeJsonField(writer, 2, "sampling_policy", generation_settings.sampling_policy, false);
+    try writeGenerationJsonFields(writer, 2);
     try writer.writeAll("  },\n");
 
     try writer.writeAll("  \"prompts\": [\n");
-    for (prompt_suite, 0..) |case, index| {
+    inline for (prompt_suite, 0..) |case, index| {
         try writer.writeAll("    {");
         try writeJsonInlineField(writer, "id", case.id, true);
         try writeJsonInlineField(writer, "category", case.category, true);
@@ -258,7 +252,7 @@ pub fn writeManifestJson(writer: anytype) !void {
     try writer.writeAll("  ],\n");
 
     try writer.writeAll("  \"metrics\": [\n");
-    for (metrics, 0..) |metric, index| {
+    inline for (metrics, 0..) |metric, index| {
         try writer.writeAll("    {");
         try writeJsonInlineField(writer, "name", metric.name, true);
         try writeJsonInlineField(writer, "unit", metric.unit, true);
@@ -269,13 +263,15 @@ pub fn writeManifestJson(writer: anytype) !void {
     try writer.writeAll("  ],\n");
 
     try writer.writeAll("  \"mlx_baseline\": {\n");
-    try writeJsonField(writer, 2, "model_dir_env", mlx_baseline.model_dir_env, true);
-    try writeJsonField(writer, 2, "prompt_file_env", mlx_baseline.prompt_file_env, true);
-    try writeJsonField(writer, 2, "command", mlx_baseline.command, true);
-    try writeJsonField(writer, 2, "timing_status", mlx_baseline.timing_status, true);
-    try writeJsonField(writer, 2, "conversion_policy", mlx_baseline.conversion_policy, true);
+    try writeJsonStringFields(writer, 2, .{
+        .{ "model_dir_env", mlx_baseline.model_dir_env },
+        .{ "prompt_file_env", mlx_baseline.prompt_file_env },
+        .{ "command", mlx_baseline.command },
+        .{ "timing_status", mlx_baseline.timing_status },
+        .{ "conversion_policy", mlx_baseline.conversion_policy },
+    }, true);
     try writer.writeAll("    \"environment_commands\": [");
-    for (mlx_baseline.environment_commands, 0..) |command, index| {
+    inline for (mlx_baseline.environment_commands, 0..) |command, index| {
         if (index != 0) try writer.writeAll(", ");
         try writeJsonString(writer, command);
     }
@@ -310,9 +306,11 @@ pub fn writeReportJson(writer: anytype, input: ReportInput) !void {
     try writeJsonField(writer, 1, "target_filename", target_artifact.filename, true);
 
     try writer.writeAll("  \"artifact\": {\n");
-    try writeJsonField(writer, 2, "model_path", input.model_path, true);
-    try writeJsonField(writer, 2, "source", input.model_source, true);
-    try writeJsonField(writer, 2, "sha256", input.artifact_sha256, true);
+    try writeJsonStringFields(writer, 2, .{
+        .{ "model_path", input.model_path },
+        .{ "source", input.model_source },
+        .{ "sha256", input.artifact_sha256 },
+    }, true);
     try writeJsonOptionalStringField(writer, 2, "revision", input.artifact_revision, true);
     try writeJsonField(writer, 2, "revision_status", input.artifact_revision_status, false);
     try writer.writeAll("  },\n");
@@ -320,64 +318,50 @@ pub fn writeReportJson(writer: anytype, input: ReportInput) !void {
     try writer.writeAll("  \"model\": {\n");
     try writeJsonOptionalStringField(writer, 2, "name", input.spec.name, true);
     try writeJsonField(writer, 2, "architecture", input.spec.architecture, true);
-    try writeJsonOptionalNumberField(writer, 2, "context_length", input.spec.context_length, true);
-    try writeJsonOptionalNumberField(writer, 2, "embedding_length", input.spec.embedding_length, true);
-    try writeJsonOptionalNumberField(writer, 2, "block_count", input.spec.block_count, true);
-    try writeJsonOptionalNumberField(writer, 2, "feed_forward_length", input.spec.feed_forward_length, true);
-    try writeJsonOptionalNumberField(writer, 2, "attention_head_count", input.spec.attention_head_count, true);
-    try writeJsonOptionalNumberField(writer, 2, "attention_head_count_kv", input.spec.attention_head_count_kv, true);
+    inline for (.{ "context_length", "embedding_length", "block_count", "feed_forward_length", "attention_head_count", "attention_head_count_kv" }) |field| {
+        try writeJsonOptionalNumberField(writer, 2, field, @field(input.spec, field), true);
+    }
     try writeJsonOptionalNumberField(writer, 2, "attention_head_count_kv_per_layer_count", optionalLen(input.spec.attention_head_count_kv_per_layer), true);
-    try writeJsonOptionalNumberField(writer, 2, "rope_dimension_count", input.spec.rope_dimension_count, true);
-    try writeJsonOptionalNumberField(writer, 2, "rope_dimension_count_swa", input.spec.rope_dimension_count_swa, true);
+    inline for (.{ "rope_dimension_count", "rope_dimension_count_swa" }) |field| {
+        try writeJsonOptionalNumberField(writer, 2, field, @field(input.spec, field), true);
+    }
     try writeJsonOptionalNumberField(writer, 2, "sliding_window_pattern_count", optionalLen(input.spec.sliding_window_pattern), true);
     try writeJsonOptionalNumberField(writer, 2, "vocab_size", input.spec.vocab_size, true);
     try writeJsonNumberField(writer, 2, "tensor_count", input.spec.tensor_count, true);
     try writer.writeAll("    \"quantization\": {");
-    try writeJsonInlineBoolField(writer, "has_f32", input.spec.quantization.has_f32, true);
-    try writeJsonInlineBoolField(writer, "has_f16", input.spec.quantization.has_f16, true);
-    try writeJsonInlineBoolField(writer, "has_q4_0", input.spec.quantization.has_q4_0, true);
-    try writeJsonInlineBoolField(writer, "has_q6_k", input.spec.quantization.has_q6_k, true);
-    try writeJsonInlineBoolField(writer, "has_unknown", input.spec.quantization.has_unknown, false);
+    inline for (.{ "has_f32", "has_f16", "has_q4_0", "has_q6_k", "has_unknown" }, 0..) |field, index| {
+        try writeJsonInlineBoolField(writer, field, @field(input.spec.quantization, field), index != 4);
+    }
     try writer.writeAll("}\n");
     try writer.writeAll("  },\n");
 
     try writer.writeAll("  \"tokenizer\": {\n");
     try writeJsonField(writer, 2, "kind", input.tokenizer_kind, true);
     try writeJsonNumberField(writer, 2, "token_count", input.tokenizer_count, true);
-    try writeJsonOptionalNumberField(writer, 2, "bos_id", input.tokenizer_bos_id, true);
-    try writeJsonOptionalNumberField(writer, 2, "eos_id", input.tokenizer_eos_id, true);
-    try writeJsonOptionalNumberField(writer, 2, "pad_id", input.tokenizer_pad_id, true);
+    inline for (.{ .{ "bos_id", "tokenizer_bos_id" }, .{ "eos_id", "tokenizer_eos_id" }, .{ "pad_id", "tokenizer_pad_id" } }) |field| {
+        try writeJsonOptionalNumberField(writer, 2, field[0], @field(input, field[1]), true);
+    }
     try writeJsonField(writer, 2, "chat_template_source", input.chat_template_source, false);
     try writer.writeAll("  },\n");
 
     try writer.writeAll("  \"generation\": {\n");
-    try writeJsonNumberField(writer, 2, "max_new_tokens", output_policy.max_new_tokens, true);
-    try writeJsonNumberField(writer, 2, "min_required_new_tokens", output_policy.min_required_new_tokens, true);
-    try writeJsonBoolField(writer, 2, "stop_on_eos", output_policy.stop_on_eos, true);
-    try writeJsonBoolField(writer, 2, "early_eos_is_failure", output_policy.early_eos_is_failure, true);
-    try writeJsonFloatField(writer, 2, "temperature", generation_settings.temperature, true);
-    try writeJsonFloatField(writer, 2, "top_p", generation_settings.top_p, true);
-    try writeJsonNumberField(writer, 2, "top_k", generation_settings.top_k, true);
-    try writeJsonFloatField(writer, 2, "repeat_penalty", generation_settings.repeat_penalty, true);
-    try writeJsonNumberField(writer, 2, "seed", generation_settings.seed, true);
-    try writeJsonField(writer, 2, "sampling_policy", generation_settings.sampling_policy, false);
+    try writeGenerationJsonFields(writer, 2);
     try writer.writeAll("  },\n");
 
     try writer.writeAll("  \"prompts\": [\n");
-    for (prompt_suite, 0..) |case, index| {
+    inline for (prompt_suite, 0..) |case, index| {
+        const formatted_bytes = if (index < input.formatted_prompt_bytes.len) input.formatted_prompt_bytes[index] else 0;
         try writer.writeAll("    {");
         try writeJsonInlineField(writer, "id", case.id, true);
         try writeJsonInlineField(writer, "category", case.category, true);
         try writeJsonInlineField(writer, "prompt", case.prompt, true);
-        try writer.writeAll("\"formatted_prompt_bytes\": ");
-        const formatted_bytes = if (index < input.formatted_prompt_bytes.len) input.formatted_prompt_bytes[index] else 0;
-        try writer.print("{d}", .{formatted_bytes});
+        try writer.print("\"formatted_prompt_bytes\": {d}", .{formatted_bytes});
         try writer.writeAll(if (index + 1 == prompt_suite.len) "}\n" else "},\n");
     }
     try writer.writeAll("  ],\n");
 
     try writer.writeAll("  \"metrics\": [\n");
-    for (metrics, 0..) |metric, index| {
+    inline for (metrics, 0..) |metric, index| {
         try writer.writeAll("    {");
         try writeJsonInlineField(writer, "name", metric.name, true);
         try writeJsonInlineField(writer, "unit", metric.unit, true);
@@ -491,6 +475,22 @@ pub fn writeContract(writer: anytype) !void {
     );
     for (mlx_baseline.environment_commands) |command| {
         try writer.print("  - {s}\n", .{command});
+    }
+}
+
+fn writeGenerationJsonFields(writer: anytype, indent: usize) !void {
+    inline for (.{ "max_new_tokens", "min_required_new_tokens" }) |field| try writeJsonNumberField(writer, indent, field, @field(output_policy, field), true);
+    inline for (.{ "stop_on_eos", "early_eos_is_failure" }) |field| try writeJsonBoolField(writer, indent, field, @field(output_policy, field), true);
+    inline for (.{ "temperature", "top_p" }) |field| try writeJsonFloatField(writer, indent, field, @field(generation_settings, field), true);
+    try writeJsonNumberField(writer, indent, "top_k", generation_settings.top_k, true);
+    try writeJsonFloatField(writer, indent, "repeat_penalty", generation_settings.repeat_penalty, true);
+    try writeJsonNumberField(writer, indent, "seed", generation_settings.seed, true);
+    try writeJsonField(writer, indent, "sampling_policy", generation_settings.sampling_policy, false);
+}
+
+fn writeJsonStringFields(writer: anytype, indent: usize, fields: anytype, trailing_comma: bool) !void {
+    inline for (fields, 0..) |field, index| {
+        try writeJsonField(writer, indent, field[0], field[1], trailing_comma or index + 1 != fields.len);
     }
 }
 

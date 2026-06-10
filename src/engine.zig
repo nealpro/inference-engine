@@ -578,42 +578,47 @@ fn fixtureGemma4Gguf(allocator: std.mem.Allocator) ![]u8 {
         .{ .name = "blk.0.post_ffw_norm.weight", .dims = &.{4} },
         .{ .name = "blk.0.layer_output_scale.weight", .dims = &.{1} },
     };
+    const string_metadata = .{
+        .{ "general.architecture", "gemma4" },
+        .{ "general.name", "fixture gemma4" },
+        .{ "tokenizer.chat_template", "<start_of_turn>user\n{{ .Prompt }}<end_of_turn>\n<start_of_turn>model\n" },
+    };
+    const u32_metadata = .{
+        .{ "general.alignment", 32 },
+        .{ "gemma4.context_length", 16 },
+        .{ "gemma4.embedding_length", 4 },
+        .{ "gemma4.block_count", 1 },
+        .{ "gemma4.feed_forward_length", 8 },
+        .{ "gemma4.attention.head_count", 2 },
+        .{ "gemma4.rope.dimension_count", 2 },
+        .{ "gemma4.rope.dimension_count_swa", 2 },
+        .{ "gemma4.attention.key_length", 2 },
+        .{ "gemma4.attention.value_length", 2 },
+        .{ "gemma4.attention.key_length_swa", 2 },
+        .{ "gemma4.attention.value_length_swa", 2 },
+        .{ "tokenizer.ggml.bos_token_id", 0 },
+        .{ "tokenizer.ggml.eos_token_id", 1 },
+        .{ "tokenizer.ggml.padding_token_id", 2 },
+    };
+    const f32_metadata = .{
+        .{ "gemma4.rope.freq_base", 1000000.0 },
+        .{ "gemma4.rope.freq_base_swa", 10000.0 },
+        .{ "gemma4.attention.layer_norm_rms_epsilon", 0.000001 },
+        .{ "gemma4.final_logit_softcapping", 30.0 },
+    };
+    const metadata_count = string_metadata.len + u32_metadata.len + f32_metadata.len + 3;
 
     try bytes.appendSlice(allocator, "GGUF");
     try appendFixtureInt(&bytes, allocator, u32, 3);
     try appendFixtureInt(&bytes, allocator, u64, tensors.len);
-    try appendFixtureInt(&bytes, allocator, u64, 25);
+    try appendFixtureInt(&bytes, allocator, u64, metadata_count);
 
-    try appendFixtureStringMeta(&bytes, allocator, "general.architecture", "gemma4");
-    try appendFixtureStringMeta(&bytes, allocator, "general.name", "fixture gemma4");
-    try appendFixtureU32Meta(&bytes, allocator, "general.alignment", 32);
-    try appendFixtureU32Meta(&bytes, allocator, "gemma4.context_length", 16);
-    try appendFixtureU32Meta(&bytes, allocator, "gemma4.embedding_length", 4);
-    try appendFixtureU32Meta(&bytes, allocator, "gemma4.block_count", 1);
-    try appendFixtureU32Meta(&bytes, allocator, "gemma4.feed_forward_length", 8);
-    try appendFixtureU32Meta(&bytes, allocator, "gemma4.attention.head_count", 2);
+    inline for (string_metadata) |entry| try appendFixtureStringMeta(&bytes, allocator, entry[0], entry[1]);
+    inline for (u32_metadata) |entry| try appendFixtureU32Meta(&bytes, allocator, entry[0], entry[1]);
+    inline for (f32_metadata) |entry| try appendFixtureF32Meta(&bytes, allocator, entry[0], entry[1]);
     try appendFixtureI32ArrayMeta(&bytes, allocator, "gemma4.attention.head_count_kv", &.{1});
-    try appendFixtureU32Meta(&bytes, allocator, "gemma4.rope.dimension_count", 2);
-    try appendFixtureU32Meta(&bytes, allocator, "gemma4.rope.dimension_count_swa", 2);
-    try appendFixtureU32Meta(&bytes, allocator, "gemma4.attention.key_length", 2);
-    try appendFixtureU32Meta(&bytes, allocator, "gemma4.attention.value_length", 2);
-    try appendFixtureU32Meta(&bytes, allocator, "gemma4.attention.key_length_swa", 2);
-    try appendFixtureU32Meta(&bytes, allocator, "gemma4.attention.value_length_swa", 2);
     try appendFixtureBoolArrayMeta(&bytes, allocator, "gemma4.attention.sliding_window_pattern", &.{true});
-    try appendFixtureF32Meta(&bytes, allocator, "gemma4.rope.freq_base", 1000000.0);
-    try appendFixtureF32Meta(&bytes, allocator, "gemma4.rope.freq_base_swa", 10000.0);
-    try appendFixtureF32Meta(&bytes, allocator, "gemma4.attention.layer_norm_rms_epsilon", 0.000001);
-    try appendFixtureF32Meta(&bytes, allocator, "gemma4.final_logit_softcapping", 30.0);
-    try appendFixtureStringArrayMeta(
-        &bytes,
-        allocator,
-        "tokenizer.ggml.tokens",
-        &.{ "<bos>", "<eos>", "<pad>", "<start_of_turn>user", "<end_of_turn>", "<start_of_turn>model", "hello", "world" },
-    );
-    try appendFixtureU32Meta(&bytes, allocator, "tokenizer.ggml.bos_token_id", 0);
-    try appendFixtureU32Meta(&bytes, allocator, "tokenizer.ggml.eos_token_id", 1);
-    try appendFixtureU32Meta(&bytes, allocator, "tokenizer.ggml.padding_token_id", 2);
-    try appendFixtureStringMeta(&bytes, allocator, "tokenizer.chat_template", "<start_of_turn>user\n{{ .Prompt }}<end_of_turn>\n<start_of_turn>model\n");
+    try appendFixtureStringArrayMeta(&bytes, allocator, "tokenizer.ggml.tokens", &.{ "<bos>", "<eos>", "<pad>", "<start_of_turn>user", "<end_of_turn>", "<start_of_turn>model", "hello", "world" });
 
     var offset: u64 = 0;
     inline for (tensors) |tensor| {

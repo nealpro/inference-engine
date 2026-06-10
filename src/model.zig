@@ -184,30 +184,23 @@ pub const QuantizationSummary = struct {
     /// Writes a compact comma-separated quantization summary.
     pub fn write(self: QuantizationSummary, writer: anytype) !void {
         var wrote = false;
-        if (self.has_f32) {
-            try writer.writeAll("F32");
-            wrote = true;
+
+        const order = comptime [_]QuantizationType{ .f32, .f16, .q4_0, .q6_k, .unknown };
+        inline for (order) |kind| {
+            const present = switch (kind) {
+                .f32 => self.has_f32,
+                .f16 => self.has_f16,
+                .q4_0 => self.has_q4_0,
+                .q6_k => self.has_q6_k,
+                .unknown => self.has_unknown,
+            };
+            if (present) {
+                if (wrote) try writer.writeAll(", ");
+                try writer.writeAll(kind.label());
+                wrote = true;
+            }
         }
-        if (self.has_f16) {
-            if (wrote) try writer.writeAll(", ");
-            try writer.writeAll("F16");
-            wrote = true;
-        }
-        if (self.has_q4_0) {
-            if (wrote) try writer.writeAll(", ");
-            try writer.writeAll("Q4_0");
-            wrote = true;
-        }
-        if (self.has_q6_k) {
-            if (wrote) try writer.writeAll(", ");
-            try writer.writeAll("Q6_K");
-            wrote = true;
-        }
-        if (self.has_unknown) {
-            if (wrote) try writer.writeAll(", ");
-            try writer.writeAll("unknown");
-            wrote = true;
-        }
+
         if (!wrote) try writer.writeAll("none");
     }
 };
@@ -301,7 +294,7 @@ pub fn validateGemma4TextTensors(tensors: []const TensorInfo) ModelError!void {
         ".post_ffw_norm.weight",
         ".layer_output_scale.weight",
     };
-    for (required_block_suffixes) |suffix| {
+    inline for (required_block_suffixes) |suffix| {
         if (!hasBlockTensorWithSuffix(tensors, suffix)) return error.MissingTensor;
     }
     if (!hasBlockTensorWithSuffix(tensors, ".attn_v.weight")) return error.MissingTensor;
@@ -454,18 +447,16 @@ pub fn tensorByteLen(kind: QuantizationType, element_count: u64) ModelError!u64 
     return switch (kind) {
         .f32 => std.math.mul(u64, element_count, 4) catch error.MalformedModel,
         .f16 => std.math.mul(u64, element_count, 2) catch error.MalformedModel,
-        .q4_0 => blk: {
-            if (element_count == 0) return error.MalformedModel;
-            const blocks = (element_count + 31) / 32;
-            break :blk std.math.mul(u64, blocks, 18) catch error.MalformedModel;
-        },
-        .q6_k => blk: {
-            if (element_count == 0) return error.MalformedModel;
-            const blocks = (element_count + 255) / 256;
-            break :blk std.math.mul(u64, blocks, 210) catch error.MalformedModel;
-        },
+        .q4_0 => quantizedTensorByteLen(element_count, 32, 18),
+        .q6_k => quantizedTensorByteLen(element_count, 256, 210),
         .unknown => error.UnsupportedQuantization,
     };
+}
+
+fn quantizedTensorByteLen(element_count: u64, comptime values_per_block: u64, comptime bytes_per_block: u64) ModelError!u64 {
+    if (element_count == 0) return error.MalformedModel;
+    const blocks = (element_count + values_per_block - 1) / values_per_block;
+    return std.math.mul(u64, blocks, bytes_per_block) catch error.MalformedModel;
 }
 
 test "quantization labels and support" {
@@ -532,38 +523,9 @@ test "Gemma 4 text tensor validator checks required families" {
 }
 
 test "Gemma 4 text model validator checks every layer and shapes" {
-    const tensors = [_]TensorInfo{
-        tensorInfoDims("token_embd.weight", &.{ 8, 4 }),
-        tensorInfoDims("output_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.attn_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.attn_q.weight", &.{ 4, 4 }),
-        tensorInfoDims("blk.0.attn_q_norm.weight", &.{2}),
-        tensorInfoDims("blk.0.attn_k.weight", &.{ 2, 4 }),
-        tensorInfoDims("blk.0.attn_k_norm.weight", &.{2}),
-        tensorInfoDims("blk.0.attn_v.weight", &.{ 2, 4 }),
-        tensorInfoDims("blk.0.attn_output.weight", &.{ 4, 4 }),
-        tensorInfoDims("blk.0.ffn_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.ffn_gate.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.0.ffn_up.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.0.ffn_down.weight", &.{ 4, 8 }),
-        tensorInfoDims("blk.0.post_attention_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.post_ffw_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.layer_output_scale.weight", &.{1}),
-        tensorInfoDims("blk.1.attn_norm.weight", &.{4}),
-        tensorInfoDims("blk.1.attn_q.weight", &.{ 4, 4 }),
-        tensorInfoDims("blk.1.attn_q_norm.weight", &.{2}),
-        tensorInfoDims("blk.1.attn_k.weight", &.{ 2, 4 }),
-        tensorInfoDims("blk.1.attn_k_norm.weight", &.{2}),
-        tensorInfoDims("blk.1.attn_v.weight", &.{ 2, 4 }),
-        tensorInfoDims("blk.1.attn_output.weight", &.{ 4, 4 }),
-        tensorInfoDims("blk.1.ffn_norm.weight", &.{4}),
-        tensorInfoDims("blk.1.ffn_gate.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.1.ffn_up.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.1.ffn_down.weight", &.{ 4, 8 }),
-        tensorInfoDims("blk.1.post_attention_norm.weight", &.{4}),
-        tensorInfoDims("blk.1.post_ffw_norm.weight", &.{4}),
-        tensorInfoDims("blk.1.layer_output_scale.weight", &.{1}),
-    };
+    const tensors = topLevelTensorInfos(&.{ 8, 4 }) ++
+        slidingLayerTensorInfos(0, .{}) ++
+        slidingLayerTensorInfos(1, .{});
     try validateGemma4TextModel(validGemma4Spec(2), &tensors);
 
     try std.testing.expectError(error.MissingTensor, validateGemma4TextModel(
@@ -573,100 +535,88 @@ test "Gemma 4 text model validator checks every layer and shapes" {
 }
 
 test "Gemma 4 text validator accepts full k-equals-v layers without v projection" {
-    const tensors = [_]TensorInfo{
-        tensorInfoDims("token_embd.weight", &.{ 8, 4 }),
-        tensorInfoDims("output_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.attn_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.attn_q.weight", &.{ 4, 4 }),
-        tensorInfoDims("blk.0.attn_q_norm.weight", &.{2}),
-        tensorInfoDims("blk.0.attn_k.weight", &.{ 2, 4 }),
-        tensorInfoDims("blk.0.attn_k_norm.weight", &.{2}),
-        tensorInfoDims("blk.0.attn_v.weight", &.{ 2, 4 }),
-        tensorInfoDims("blk.0.attn_output.weight", &.{ 4, 4 }),
-        tensorInfoDims("blk.0.ffn_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.ffn_gate.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.0.ffn_up.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.0.ffn_down.weight", &.{ 4, 8 }),
-        tensorInfoDims("blk.0.post_attention_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.post_ffw_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.layer_output_scale.weight", &.{1}),
-        tensorInfoDims("blk.1.attn_norm.weight", &.{4}),
-        tensorInfoDims("blk.1.attn_q.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.1.attn_q_norm.weight", &.{4}),
-        tensorInfoDims("blk.1.attn_k.weight", &.{ 4, 4 }),
-        tensorInfoDims("blk.1.attn_k_norm.weight", &.{4}),
-        tensorInfoDims("blk.1.attn_output.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.1.ffn_norm.weight", &.{4}),
-        tensorInfoDims("blk.1.ffn_gate.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.1.ffn_up.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.1.ffn_down.weight", &.{ 4, 8 }),
-        tensorInfoDims("blk.1.post_attention_norm.weight", &.{4}),
-        tensorInfoDims("blk.1.post_ffw_norm.weight", &.{4}),
-        tensorInfoDims("blk.1.layer_output_scale.weight", &.{1}),
-    };
+    const tensors = topLevelTensorInfos(&.{ 8, 4 }) ++
+        slidingLayerTensorInfos(0, .{}) ++
+        fullAttentionLayerTensorInfos(1);
     try validateGemma4TextModel(validMixedGemma4Spec(), &tensors);
 }
 
 test "Gemma 4 text model validator rejects bad top-level and layer shapes" {
-    const bad_embedding = [_]TensorInfo{
-        tensorInfoDims("token_embd.weight", &.{ 8, 5 }),
-        tensorInfoDims("output_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.attn_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.attn_q.weight", &.{ 4, 4 }),
-        tensorInfoDims("blk.0.attn_q_norm.weight", &.{2}),
-        tensorInfoDims("blk.0.attn_k.weight", &.{ 2, 4 }),
-        tensorInfoDims("blk.0.attn_k_norm.weight", &.{2}),
-        tensorInfoDims("blk.0.attn_v.weight", &.{ 2, 4 }),
-        tensorInfoDims("blk.0.attn_output.weight", &.{ 4, 4 }),
-        tensorInfoDims("blk.0.ffn_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.ffn_gate.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.0.ffn_up.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.0.ffn_down.weight", &.{ 4, 8 }),
-        tensorInfoDims("blk.0.post_attention_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.post_ffw_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.layer_output_scale.weight", &.{1}),
-    };
+    const bad_embedding = topLevelTensorInfos(&.{ 8, 5 }) ++ slidingLayerTensorInfos(0, .{});
     try std.testing.expectError(error.ShapeMismatch, validateGemma4TextModel(validGemma4Spec(1), &bad_embedding));
 
-    const bad_norm = [_]TensorInfo{
-        tensorInfoDims("token_embd.weight", &.{ 8, 4 }),
-        tensorInfoDims("output_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.attn_norm.weight", &.{ 4, 1 }),
-        tensorInfoDims("blk.0.attn_q.weight", &.{ 4, 4 }),
-        tensorInfoDims("blk.0.attn_q_norm.weight", &.{2}),
-        tensorInfoDims("blk.0.attn_k.weight", &.{ 2, 4 }),
-        tensorInfoDims("blk.0.attn_k_norm.weight", &.{2}),
-        tensorInfoDims("blk.0.attn_v.weight", &.{ 2, 4 }),
-        tensorInfoDims("blk.0.attn_output.weight", &.{ 4, 4 }),
-        tensorInfoDims("blk.0.ffn_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.ffn_gate.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.0.ffn_up.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.0.ffn_down.weight", &.{ 4, 8 }),
-        tensorInfoDims("blk.0.post_attention_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.post_ffw_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.layer_output_scale.weight", &.{1}),
-    };
+    const bad_norm = topLevelTensorInfos(&.{ 8, 4 }) ++
+        slidingLayerTensorInfos(0, .{ .attn_norm = &.{ 4, 1 } });
     try std.testing.expectError(error.ShapeMismatch, validateGemma4TextModel(validGemma4Spec(1), &bad_norm));
 
-    const bad_ffn = [_]TensorInfo{
-        tensorInfoDims("token_embd.weight", &.{ 8, 4 }),
-        tensorInfoDims("output_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.attn_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.attn_q.weight", &.{ 4, 4 }),
-        tensorInfoDims("blk.0.attn_q_norm.weight", &.{2}),
-        tensorInfoDims("blk.0.attn_k.weight", &.{ 2, 4 }),
-        tensorInfoDims("blk.0.attn_k_norm.weight", &.{2}),
-        tensorInfoDims("blk.0.attn_v.weight", &.{ 2, 4 }),
-        tensorInfoDims("blk.0.attn_output.weight", &.{ 4, 4 }),
-        tensorInfoDims("blk.0.ffn_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.ffn_gate.weight", &.{ 7, 4 }),
-        tensorInfoDims("blk.0.ffn_up.weight", &.{ 8, 4 }),
-        tensorInfoDims("blk.0.ffn_down.weight", &.{ 4, 8 }),
-        tensorInfoDims("blk.0.post_attention_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.post_ffw_norm.weight", &.{4}),
-        tensorInfoDims("blk.0.layer_output_scale.weight", &.{1}),
-    };
+    const bad_ffn = topLevelTensorInfos(&.{ 8, 4 }) ++
+        slidingLayerTensorInfos(0, .{ .ffn_gate = &.{ 7, 4 } });
     try std.testing.expectError(error.ShapeMismatch, validateGemma4TextModel(validGemma4Spec(1), &bad_ffn));
+}
+
+const SlidingLayerDims = struct {
+    attn_norm: []const u64 = &.{4},
+    attn_q: []const u64 = &.{ 4, 4 },
+    attn_q_norm: []const u64 = &.{2},
+    attn_k: []const u64 = &.{ 2, 4 },
+    attn_k_norm: []const u64 = &.{2},
+    attn_v: []const u64 = &.{ 2, 4 },
+    attn_output: []const u64 = &.{ 4, 4 },
+    ffn_norm: []const u64 = &.{4},
+    ffn_gate: []const u64 = &.{ 8, 4 },
+    ffn_up: []const u64 = &.{ 8, 4 },
+    ffn_down: []const u64 = &.{ 4, 8 },
+    post_attention_norm: []const u64 = &.{4},
+    post_ffw_norm: []const u64 = &.{4},
+    layer_output_scale: []const u64 = &.{1},
+};
+
+fn topLevelTensorInfos(comptime token_embedding_dims: []const u64) [2]TensorInfo {
+    return .{
+        tensorInfoDims("token_embd.weight", token_embedding_dims),
+        tensorInfoDims("output_norm.weight", &.{4}),
+    };
+}
+
+fn slidingLayerTensorInfos(comptime layer: usize, comptime dims: SlidingLayerDims) [14]TensorInfo {
+    return .{
+        layerTensorInfo(layer, "attn_norm.weight", dims.attn_norm),
+        layerTensorInfo(layer, "attn_q.weight", dims.attn_q),
+        layerTensorInfo(layer, "attn_q_norm.weight", dims.attn_q_norm),
+        layerTensorInfo(layer, "attn_k.weight", dims.attn_k),
+        layerTensorInfo(layer, "attn_k_norm.weight", dims.attn_k_norm),
+        layerTensorInfo(layer, "attn_v.weight", dims.attn_v),
+        layerTensorInfo(layer, "attn_output.weight", dims.attn_output),
+        layerTensorInfo(layer, "ffn_norm.weight", dims.ffn_norm),
+        layerTensorInfo(layer, "ffn_gate.weight", dims.ffn_gate),
+        layerTensorInfo(layer, "ffn_up.weight", dims.ffn_up),
+        layerTensorInfo(layer, "ffn_down.weight", dims.ffn_down),
+        layerTensorInfo(layer, "post_attention_norm.weight", dims.post_attention_norm),
+        layerTensorInfo(layer, "post_ffw_norm.weight", dims.post_ffw_norm),
+        layerTensorInfo(layer, "layer_output_scale.weight", dims.layer_output_scale),
+    };
+}
+
+fn fullAttentionLayerTensorInfos(comptime layer: usize) [13]TensorInfo {
+    return .{
+        layerTensorInfo(layer, "attn_norm.weight", &.{4}),
+        layerTensorInfo(layer, "attn_q.weight", &.{ 8, 4 }),
+        layerTensorInfo(layer, "attn_q_norm.weight", &.{4}),
+        layerTensorInfo(layer, "attn_k.weight", &.{ 4, 4 }),
+        layerTensorInfo(layer, "attn_k_norm.weight", &.{4}),
+        layerTensorInfo(layer, "attn_output.weight", &.{ 8, 4 }),
+        layerTensorInfo(layer, "ffn_norm.weight", &.{4}),
+        layerTensorInfo(layer, "ffn_gate.weight", &.{ 8, 4 }),
+        layerTensorInfo(layer, "ffn_up.weight", &.{ 8, 4 }),
+        layerTensorInfo(layer, "ffn_down.weight", &.{ 4, 8 }),
+        layerTensorInfo(layer, "post_attention_norm.weight", &.{4}),
+        layerTensorInfo(layer, "post_ffw_norm.weight", &.{4}),
+        layerTensorInfo(layer, "layer_output_scale.weight", &.{1}),
+    };
+}
+
+fn layerTensorInfo(comptime layer: usize, comptime suffix: []const u8, comptime dims: []const u64) TensorInfo {
+    return tensorInfoDims(std.fmt.comptimePrint("blk.{d}.{s}", .{ layer, suffix }), dims);
 }
 
 fn tensorInfo(name: []const u8) TensorInfo {

@@ -606,18 +606,26 @@ fn fixtureGguf(allocator: std.mem.Allocator, unsupported_quant: bool) ![]u8 {
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(allocator);
 
+    const string_metadata = .{
+        .{ "general.architecture", "toy" },
+        .{ "general.name", "toy model" },
+    };
+    const u32_metadata = .{
+        .{ "general.alignment", 32 },
+        .{ "toy.context_length", 8 },
+        .{ "toy.embedding_length", 2 },
+        .{ "toy.block_count", 1 },
+        .{ "toy.attention.head_count", 1 },
+    };
+    const metadata_count = string_metadata.len + u32_metadata.len + 3;
+
     try bytes.appendSlice(allocator, "GGUF");
     try appendInt(&bytes, allocator, u32, 3);
     try appendInt(&bytes, allocator, u64, 1);
-    try appendInt(&bytes, allocator, u64, 10);
+    try appendInt(&bytes, allocator, u64, metadata_count);
 
-    try appendStringMeta(&bytes, allocator, "general.architecture", "toy");
-    try appendStringMeta(&bytes, allocator, "general.name", "toy model");
-    try appendU32Meta(&bytes, allocator, "general.alignment", 32);
-    try appendU32Meta(&bytes, allocator, "toy.context_length", 8);
-    try appendU32Meta(&bytes, allocator, "toy.embedding_length", 2);
-    try appendU32Meta(&bytes, allocator, "toy.block_count", 1);
-    try appendU32Meta(&bytes, allocator, "toy.attention.head_count", 1);
+    inline for (string_metadata) |entry| try appendStringMeta(&bytes, allocator, entry[0], entry[1]);
+    inline for (u32_metadata) |entry| try appendU32Meta(&bytes, allocator, entry[0], entry[1]);
     try appendI32ArrayMeta(&bytes, allocator, "toy.attention.head_count_kv", &.{1});
     try appendBoolArrayMeta(&bytes, allocator, "toy.attention.sliding_window_pattern", &.{true});
     try appendStringArrayMeta(&bytes, allocator, "tokenizer.ggml.tokens", &.{ "a", "b" });
