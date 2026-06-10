@@ -253,7 +253,10 @@ pub const Engine = struct {
         if (ctx.spec.feed_forward_length) |value| try writer.print("feed-forward-length: {d}\n", .{value});
         if (ctx.spec.attention_head_count) |value| try writer.print("attention-head-count: {d}\n", .{value});
         if (ctx.spec.attention_head_count_kv) |value| try writer.print("attention-head-count-kv: {d}\n", .{value});
+        if (ctx.spec.attention_head_count_kv_per_layer) |values| try writer.print("attention-head-count-kv-layers: {d}\n", .{values.len});
         if (ctx.spec.rope_dimension_count) |value| try writer.print("rope-dimension-count: {d}\n", .{value});
+        if (ctx.spec.rope_dimension_count_swa) |value| try writer.print("rope-dimension-count-swa: {d}\n", .{value});
+        if (ctx.spec.sliding_window_pattern) |values| try writer.print("sliding-window-pattern-layers: {d}\n", .{values.len});
         if (ctx.spec.vocab_size) |value| try writer.print("vocab-size: {d}\n", .{value});
         try writer.print("tensor-count: {d}\nquantization: ", .{ctx.spec.tensor_count});
         try ctx.spec.quantization.write(writer);
@@ -529,41 +532,57 @@ test "benchmark report json validates fixture GGUF without generation" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"value\": null") != null);
 }
 
+test "official Gemma 4 GGUF validates when integration env is set" {
+    const io = std.testing.io;
+    const dir = std.testing.environ.getAlloc(std.testing.allocator, benchmark.gemma4_integration_env) catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return,
+        else => return err,
+    };
+    defer std.testing.allocator.free(dir);
+
+    const path = try std.Io.Dir.path.join(std.testing.allocator, &.{ dir, benchmark.target_artifact.filename });
+    defer std.testing.allocator.free(path);
+
+    var out: [20000]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&out);
+    try Engine.init().run(std.testing.allocator, io, .{}, &writer, .{
+        .model_path = path,
+        .validate_model = true,
+        .artifact_revision = "integration-test",
+    });
+
+    const text = out[0..writer.end];
+    try std.testing.expect(std.mem.indexOf(u8, text, "model validation: ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "tensor-count: 667") != null);
+}
+
 fn fixtureGemma4Gguf(allocator: std.mem.Allocator) ![]u8 {
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(allocator);
 
-    const tensor_names = [_][]const u8{
-        "token_embd.weight",
-        "output_norm.weight",
-        "blk.0.attn_norm.weight",
-        "blk.0.attn_q.weight",
-        "blk.0.attn_k.weight",
-        "blk.0.attn_v.weight",
-        "blk.0.attn_output.weight",
-        "blk.0.ffn_norm.weight",
-        "blk.0.ffn_gate.weight",
-        "blk.0.ffn_up.weight",
-        "blk.0.ffn_down.weight",
-    };
-    const tensor_dims = [_][]const u64{
-        &.{ 8, 4 },
-        &.{4},
-        &.{4},
-        &.{ 4, 4 },
-        &.{ 2, 4 },
-        &.{ 2, 4 },
-        &.{ 4, 4 },
-        &.{4},
-        &.{ 8, 4 },
-        &.{ 8, 4 },
-        &.{ 4, 8 },
+    const tensors = comptime [_]FixtureTensor{
+        .{ .name = "token_embd.weight", .dims = &.{ 8, 4 }, .kind = .q6_k },
+        .{ .name = "output_norm.weight", .dims = &.{4} },
+        .{ .name = "blk.0.attn_norm.weight", .dims = &.{4} },
+        .{ .name = "blk.0.attn_q.weight", .dims = &.{ 4, 4 } },
+        .{ .name = "blk.0.attn_q_norm.weight", .dims = &.{2} },
+        .{ .name = "blk.0.attn_k.weight", .dims = &.{ 2, 4 } },
+        .{ .name = "blk.0.attn_k_norm.weight", .dims = &.{2} },
+        .{ .name = "blk.0.attn_v.weight", .dims = &.{ 2, 4 } },
+        .{ .name = "blk.0.attn_output.weight", .dims = &.{ 4, 4 } },
+        .{ .name = "blk.0.ffn_norm.weight", .dims = &.{4} },
+        .{ .name = "blk.0.ffn_gate.weight", .dims = &.{ 8, 4 } },
+        .{ .name = "blk.0.ffn_up.weight", .dims = &.{ 8, 4 } },
+        .{ .name = "blk.0.ffn_down.weight", .dims = &.{ 4, 8 } },
+        .{ .name = "blk.0.post_attention_norm.weight", .dims = &.{4} },
+        .{ .name = "blk.0.post_ffw_norm.weight", .dims = &.{4} },
+        .{ .name = "blk.0.layer_output_scale.weight", .dims = &.{1} },
     };
 
     try bytes.appendSlice(allocator, "GGUF");
     try appendFixtureInt(&bytes, allocator, u32, 3);
-    try appendFixtureInt(&bytes, allocator, u64, tensor_names.len);
-    try appendFixtureInt(&bytes, allocator, u64, 15);
+    try appendFixtureInt(&bytes, allocator, u64, tensors.len);
+    try appendFixtureInt(&bytes, allocator, u64, 25);
 
     try appendFixtureStringMeta(&bytes, allocator, "general.architecture", "gemma4");
     try appendFixtureStringMeta(&bytes, allocator, "general.name", "fixture gemma4");
@@ -573,8 +592,18 @@ fn fixtureGemma4Gguf(allocator: std.mem.Allocator) ![]u8 {
     try appendFixtureU32Meta(&bytes, allocator, "gemma4.block_count", 1);
     try appendFixtureU32Meta(&bytes, allocator, "gemma4.feed_forward_length", 8);
     try appendFixtureU32Meta(&bytes, allocator, "gemma4.attention.head_count", 2);
-    try appendFixtureU32Meta(&bytes, allocator, "gemma4.attention.head_count_kv", 1);
+    try appendFixtureI32ArrayMeta(&bytes, allocator, "gemma4.attention.head_count_kv", &.{1});
     try appendFixtureU32Meta(&bytes, allocator, "gemma4.rope.dimension_count", 2);
+    try appendFixtureU32Meta(&bytes, allocator, "gemma4.rope.dimension_count_swa", 2);
+    try appendFixtureU32Meta(&bytes, allocator, "gemma4.attention.key_length", 2);
+    try appendFixtureU32Meta(&bytes, allocator, "gemma4.attention.value_length", 2);
+    try appendFixtureU32Meta(&bytes, allocator, "gemma4.attention.key_length_swa", 2);
+    try appendFixtureU32Meta(&bytes, allocator, "gemma4.attention.value_length_swa", 2);
+    try appendFixtureBoolArrayMeta(&bytes, allocator, "gemma4.attention.sliding_window_pattern", &.{true});
+    try appendFixtureF32Meta(&bytes, allocator, "gemma4.rope.freq_base", 1000000.0);
+    try appendFixtureF32Meta(&bytes, allocator, "gemma4.rope.freq_base_swa", 10000.0);
+    try appendFixtureF32Meta(&bytes, allocator, "gemma4.attention.layer_norm_rms_epsilon", 0.000001);
+    try appendFixtureF32Meta(&bytes, allocator, "gemma4.final_logit_softcapping", 30.0);
     try appendFixtureStringArrayMeta(
         &bytes,
         allocator,
@@ -587,19 +616,41 @@ fn fixtureGemma4Gguf(allocator: std.mem.Allocator) ![]u8 {
     try appendFixtureStringMeta(&bytes, allocator, "tokenizer.chat_template", "<start_of_turn>user\n{{ .Prompt }}<end_of_turn>\n<start_of_turn>model\n");
 
     var offset: u64 = 0;
-    for (tensor_names, 0..) |name, index| {
-        try appendFixtureString(&bytes, allocator, name);
-        try appendFixtureInt(&bytes, allocator, u32, tensor_dims[index].len);
-        for (tensor_dims[index]) |dim| try appendFixtureInt(&bytes, allocator, u64, dim);
-        try appendFixtureInt(&bytes, allocator, u32, 2);
+    inline for (tensors) |tensor| {
+        try appendFixtureString(&bytes, allocator, tensor.name);
+        try appendFixtureInt(&bytes, allocator, u32, tensor.dims.len);
+        for (tensor.dims) |dim| try appendFixtureInt(&bytes, allocator, u64, dim);
+        try appendFixtureInt(&bytes, allocator, u32, fixtureGgmlKind(tensor.kind));
         try appendFixtureInt(&bytes, allocator, u64, offset);
-        offset += 18;
+        offset += try model.tensorByteLen(tensor.kind, fixtureElementCount(tensor.dims));
     }
 
     while (bytes.items.len % 32 != 0) try bytes.append(allocator, 0);
     try bytes.appendNTimes(allocator, 0, offset);
 
     return bytes.toOwnedSlice(allocator);
+}
+
+const FixtureTensor = struct {
+    name: []const u8,
+    dims: []const u64,
+    kind: model.QuantizationType = .q4_0,
+};
+
+fn fixtureElementCount(dims: []const u64) u64 {
+    var total: u64 = 1;
+    for (dims) |dim| total *= dim;
+    return total;
+}
+
+fn fixtureGgmlKind(kind: model.QuantizationType) u32 {
+    return switch (kind) {
+        .f32 => 0,
+        .f16 => 1,
+        .q4_0 => 2,
+        .q6_k => 14,
+        .unknown => 999,
+    };
 }
 
 fn appendFixtureStringMeta(bytes: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8, value: []const u8) !void {
@@ -616,10 +667,32 @@ fn appendFixtureStringArrayMeta(bytes: *std.ArrayList(u8), allocator: std.mem.Al
     for (values) |value| try appendFixtureString(bytes, allocator, value);
 }
 
+fn appendFixtureI32ArrayMeta(bytes: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8, values: []const i32) !void {
+    try appendFixtureString(bytes, allocator, key);
+    try appendFixtureInt(bytes, allocator, u32, 9);
+    try appendFixtureInt(bytes, allocator, u32, 5);
+    try appendFixtureInt(bytes, allocator, u64, values.len);
+    for (values) |value| try appendFixtureInt(bytes, allocator, i32, value);
+}
+
+fn appendFixtureBoolArrayMeta(bytes: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8, values: []const bool) !void {
+    try appendFixtureString(bytes, allocator, key);
+    try appendFixtureInt(bytes, allocator, u32, 9);
+    try appendFixtureInt(bytes, allocator, u32, 7);
+    try appendFixtureInt(bytes, allocator, u64, values.len);
+    for (values) |value| try bytes.append(allocator, if (value) 1 else 0);
+}
+
 fn appendFixtureU32Meta(bytes: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8, value: u32) !void {
     try appendFixtureString(bytes, allocator, key);
     try appendFixtureInt(bytes, allocator, u32, 4);
     try appendFixtureInt(bytes, allocator, u32, value);
+}
+
+fn appendFixtureF32Meta(bytes: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8, value: f32) !void {
+    try appendFixtureString(bytes, allocator, key);
+    try appendFixtureInt(bytes, allocator, u32, 6);
+    try appendFixtureInt(bytes, allocator, u32, @as(u32, @bitCast(value)));
 }
 
 fn appendFixtureString(bytes: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {

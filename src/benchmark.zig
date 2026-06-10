@@ -326,13 +326,17 @@ pub fn writeReportJson(writer: anytype, input: ReportInput) !void {
     try writeJsonOptionalNumberField(writer, 2, "feed_forward_length", input.spec.feed_forward_length, true);
     try writeJsonOptionalNumberField(writer, 2, "attention_head_count", input.spec.attention_head_count, true);
     try writeJsonOptionalNumberField(writer, 2, "attention_head_count_kv", input.spec.attention_head_count_kv, true);
+    try writeJsonOptionalNumberField(writer, 2, "attention_head_count_kv_per_layer_count", optionalLen(input.spec.attention_head_count_kv_per_layer), true);
     try writeJsonOptionalNumberField(writer, 2, "rope_dimension_count", input.spec.rope_dimension_count, true);
+    try writeJsonOptionalNumberField(writer, 2, "rope_dimension_count_swa", input.spec.rope_dimension_count_swa, true);
+    try writeJsonOptionalNumberField(writer, 2, "sliding_window_pattern_count", optionalLen(input.spec.sliding_window_pattern), true);
     try writeJsonOptionalNumberField(writer, 2, "vocab_size", input.spec.vocab_size, true);
     try writeJsonNumberField(writer, 2, "tensor_count", input.spec.tensor_count, true);
     try writer.writeAll("    \"quantization\": {");
     try writeJsonInlineBoolField(writer, "has_f32", input.spec.quantization.has_f32, true);
     try writeJsonInlineBoolField(writer, "has_f16", input.spec.quantization.has_f16, true);
     try writeJsonInlineBoolField(writer, "has_q4_0", input.spec.quantization.has_q4_0, true);
+    try writeJsonInlineBoolField(writer, "has_q6_k", input.spec.quantization.has_q6_k, true);
     try writeJsonInlineBoolField(writer, "has_unknown", input.spec.quantization.has_unknown, false);
     try writer.writeAll("}\n");
     try writer.writeAll("  },\n");
@@ -541,6 +545,11 @@ fn writeJsonOptionalNumberField(writer: anytype, indent: usize, key: []const u8,
         try writer.writeAll("null");
     }
     try writer.writeAll(if (comma) ",\n" else "\n");
+}
+
+fn optionalLen(value: anytype) ?usize {
+    if (value) |some| return some.len;
+    return null;
 }
 
 fn writeJsonInlineField(writer: anytype, key: []const u8, value: []const u8, comma: bool) !void {

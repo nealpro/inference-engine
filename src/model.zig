@@ -21,6 +21,7 @@ pub const QuantizationType = enum {
     f32,
     f16,
     q4_0,
+    q6_k,
     unknown,
 
     /// Converts a GGML type id to the local quantization enum.
@@ -29,6 +30,7 @@ pub const QuantizationType = enum {
             0 => .f32,
             1 => .f16,
             2 => .q4_0,
+            14 => .q6_k,
             else => .unknown,
         };
     }
@@ -39,6 +41,7 @@ pub const QuantizationType = enum {
             .f32 => "F32",
             .f16 => "F16",
             .q4_0 => "Q4_0",
+            .q6_k => "Q6_K",
             .unknown => "unknown",
         };
     }
@@ -46,7 +49,7 @@ pub const QuantizationType = enum {
     /// True when the tensor kind can be represented by this scaffold.
     pub fn isSupported(self: QuantizationType) bool {
         return switch (self) {
-            .f32, .f16, .q4_0 => true,
+            .f32, .f16, .q4_0, .q6_k => true,
             .unknown => false,
         };
     }
@@ -84,6 +87,14 @@ const Gemma4TextSpecValues = struct {
     feed_forward_length: u32,
     attention_head_count: u32,
     attention_head_count_kv: u32,
+    attention_head_count_kv_per_layer: ?[]const u32,
+    sliding_window_pattern: ?[]const bool,
+    rope_dimension_count: ?u32,
+    rope_dimension_count_swa: ?u32,
+    attention_key_length: ?u32,
+    attention_value_length: ?u32,
+    attention_key_length_swa: ?u32,
+    attention_value_length_swa: ?u32,
     vocab_size: u32,
 
     fn fromSpec(spec: ModelSpec) ModelError!Gemma4TextSpecValues {
@@ -92,15 +103,62 @@ const Gemma4TextSpecValues = struct {
             .embedding_length = spec.embedding_length orelse return error.MissingMetadata,
             .feed_forward_length = spec.feed_forward_length orelse return error.MissingMetadata,
             .attention_head_count = spec.attention_head_count orelse return error.MissingMetadata,
-            .attention_head_count_kv = spec.attention_head_count_kv orelse return error.MissingMetadata,
+            .attention_head_count_kv = spec.attention_head_count_kv orelse blk: {
+                const values = spec.attention_head_count_kv_per_layer orelse return error.MissingMetadata;
+                if (values.len == 0) return error.MissingMetadata;
+                break :blk values[0];
+            },
+            .attention_head_count_kv_per_layer = spec.attention_head_count_kv_per_layer,
+            .sliding_window_pattern = spec.sliding_window_pattern,
+            .rope_dimension_count = spec.rope_dimension_count,
+            .rope_dimension_count_swa = spec.rope_dimension_count_swa,
+            .attention_key_length = spec.attention_key_length,
+            .attention_value_length = spec.attention_value_length,
+            .attention_key_length_swa = spec.attention_key_length_swa,
+            .attention_value_length_swa = spec.attention_value_length_swa,
             .vocab_size = spec.vocab_size orelse return error.MissingMetadata,
         };
     }
 
-    fn kvWidth(self: Gemma4TextSpecValues) ?u32 {
-        const product = std.math.mul(u32, self.embedding_length, self.attention_head_count_kv) catch return null;
-        if (self.attention_head_count == 0 or product % self.attention_head_count != 0) return null;
+    fn isSlidingLayer(self: Gemma4TextSpecValues, layer: usize) ModelError!bool {
+        if (self.sliding_window_pattern) |pattern| {
+            if (layer >= pattern.len) return error.MissingMetadata;
+            return pattern[layer];
+        }
+        return true;
+    }
+
+    fn kvHeadsForLayer(self: Gemma4TextSpecValues, layer: usize) ModelError!u32 {
+        if (self.attention_head_count_kv_per_layer) |values| {
+            if (layer >= values.len) return error.MissingMetadata;
+            return values[layer];
+        }
+        return self.attention_head_count_kv;
+    }
+
+    fn headDimForLayer(self: Gemma4TextSpecValues, layer: usize) ModelError!u32 {
+        const sliding = try self.isSlidingLayer(layer);
+        if (sliding) {
+            if (self.attention_key_length_swa) |value| return value;
+            if (self.rope_dimension_count_swa) |value| return value;
+        } else {
+            if (self.attention_key_length) |value| return value;
+            if (self.rope_dimension_count) |value| return value;
+        }
+        const kv_heads = try self.kvHeadsForLayer(layer);
+        const product = std.math.mul(u32, self.embedding_length, kv_heads) catch return error.MalformedModel;
+        if (self.attention_head_count == 0 or product % self.attention_head_count != 0) return error.MalformedModel;
         return product / self.attention_head_count;
+    }
+
+    fn valueDimForLayer(self: Gemma4TextSpecValues, layer: usize) ModelError!u32 {
+        const sliding = try self.isSlidingLayer(layer);
+        if (sliding) {
+            if (self.attention_value_length_swa) |value| return value;
+        } else {
+            if (self.attention_value_length) |value| return value;
+        }
+        return try self.headDimForLayer(layer);
     }
 };
 
@@ -109,6 +167,7 @@ pub const QuantizationSummary = struct {
     has_f32: bool = false,
     has_f16: bool = false,
     has_q4_0: bool = false,
+    has_q6_k: bool = false,
     has_unknown: bool = false,
 
     /// Records one tensor kind in the summary.
@@ -117,6 +176,7 @@ pub const QuantizationSummary = struct {
             .f32 => self.has_f32 = true,
             .f16 => self.has_f16 = true,
             .q4_0 => self.has_q4_0 = true,
+            .q6_k => self.has_q6_k = true,
             .unknown => self.has_unknown = true,
         }
     }
@@ -138,6 +198,11 @@ pub const QuantizationSummary = struct {
             try writer.writeAll("Q4_0");
             wrote = true;
         }
+        if (self.has_q6_k) {
+            if (wrote) try writer.writeAll(", ");
+            try writer.writeAll("Q6_K");
+            wrote = true;
+        }
         if (self.has_unknown) {
             if (wrote) try writer.writeAll(", ");
             try writer.writeAll("unknown");
@@ -157,7 +222,19 @@ pub const ModelSpec = struct {
     feed_forward_length: ?u32 = null,
     attention_head_count: ?u32 = null,
     attention_head_count_kv: ?u32 = null,
+    attention_head_count_kv_per_layer: ?[]const u32 = null,
     rope_dimension_count: ?u32 = null,
+    rope_dimension_count_swa: ?u32 = null,
+    attention_key_length: ?u32 = null,
+    attention_value_length: ?u32 = null,
+    attention_key_length_swa: ?u32 = null,
+    attention_value_length_swa: ?u32 = null,
+    sliding_window_pattern: ?[]const bool = null,
+    rope_freq_base: ?f32 = null,
+    rope_freq_base_swa: ?f32 = null,
+    attention_layer_norm_rms_epsilon: ?f32 = null,
+    final_logit_softcapping: ?f32 = null,
+    attention_sliding_window: ?u32 = null,
     vocab_size: ?u32 = null,
     tensor_count: usize,
     quantization: QuantizationSummary,
@@ -166,6 +243,8 @@ pub const ModelSpec = struct {
     pub fn deinit(self: ModelSpec, allocator: std.mem.Allocator) void {
         if (self.name) |name| allocator.free(name);
         allocator.free(self.architecture);
+        if (self.attention_head_count_kv_per_layer) |values| allocator.free(values);
+        if (self.sliding_window_pattern) |values| allocator.free(values);
     }
 
     /// Checks the generic text-inference metadata requirements.
@@ -195,10 +274,11 @@ pub fn validateGemma4TextSpec(spec: ModelSpec) ModelError!void {
     }
     if (spec.context_length == null) return error.MissingMetadata;
     if (spec.feed_forward_length == null) return error.MissingMetadata;
-    if (spec.attention_head_count_kv == null) return error.MissingMetadata;
+    if (spec.attention_head_count_kv == null and spec.attention_head_count_kv_per_layer == null) return error.MissingMetadata;
     if (spec.rope_dimension_count == null) return error.MissingMetadata;
     if (spec.vocab_size == null) return error.MissingMetadata;
     if (!spec.quantization.has_q4_0) return error.UnsupportedQuantization;
+    try validateOfficialGemma4_12bSpec(spec);
 }
 
 /// Validates that required Gemma 4 text tensor families are present.
@@ -209,17 +289,22 @@ pub fn validateGemma4TextTensors(tensors: []const TensorInfo) ModelError!void {
     const required_block_suffixes = [_][]const u8{
         ".attn_norm.weight",
         ".attn_q.weight",
+        ".attn_q_norm.weight",
         ".attn_k.weight",
-        ".attn_v.weight",
+        ".attn_k_norm.weight",
         ".attn_output.weight",
         ".ffn_norm.weight",
         ".ffn_gate.weight",
         ".ffn_up.weight",
         ".ffn_down.weight",
+        ".post_attention_norm.weight",
+        ".post_ffw_norm.weight",
+        ".layer_output_scale.weight",
     };
     for (required_block_suffixes) |suffix| {
         if (!hasBlockTensorWithSuffix(tensors, suffix)) return error.MissingTensor;
     }
+    if (!hasBlockTensorWithSuffix(tensors, ".attn_v.weight")) return error.MissingTensor;
 }
 
 fn validateGemma4TextTensorShapes(spec: ModelSpec, tensors: []const TensorInfo) ModelError!void {
@@ -230,21 +315,81 @@ fn validateGemma4TextTensorShapes(spec: ModelSpec, tensors: []const TensorInfo) 
 
     const output_norm = tensorByName(tensors, "output_norm.weight") orelse return error.MissingTensor;
     try expectVector(output_norm, values.embedding_length);
+    if (tensorByName(tensors, "rope_freqs.weight")) |rope_freqs| {
+        if (values.rope_dimension_count_swa) |swa_dim| {
+            try expectVector(rope_freqs, swa_dim);
+        }
+    }
 
     const block_count = std.math.cast(usize, values.block_count) orelse return error.MalformedModel;
-    const kv_width = values.kvWidth();
     var name_buf: [128]u8 = undefined;
     for (0..block_count) |layer| {
+        const sliding = try values.isSlidingLayer(layer);
+        const head_dim = try values.headDimForLayer(layer);
+        const value_dim = try values.valueDimForLayer(layer);
+        const kv_heads = try values.kvHeadsForLayer(layer);
+        const q_width = std.math.mul(u32, values.attention_head_count, head_dim) catch return error.MalformedModel;
+        const k_width = std.math.mul(u32, kv_heads, head_dim) catch return error.MalformedModel;
+        const v_width = std.math.mul(u32, kv_heads, value_dim) catch return error.MalformedModel;
+
         try expectLayerVector(tensors, &name_buf, layer, "attn_norm.weight", values.embedding_length);
-        try expectLayerMatrixHiddenHidden(tensors, &name_buf, layer, "attn_q.weight", values.embedding_length);
-        try expectLayerKvMatrix(tensors, &name_buf, layer, "attn_k.weight", values.embedding_length, kv_width);
-        try expectLayerKvMatrix(tensors, &name_buf, layer, "attn_v.weight", values.embedding_length, kv_width);
-        try expectLayerMatrixHiddenHidden(tensors, &name_buf, layer, "attn_output.weight", values.embedding_length);
+        try expectLayerVector(tensors, &name_buf, layer, "attn_q_norm.weight", head_dim);
+        try expectLayerVector(tensors, &name_buf, layer, "attn_k_norm.weight", head_dim);
+        try expectLayerMatrixContaining(tensors, &name_buf, layer, "attn_q.weight", values.embedding_length, q_width);
+        try expectLayerMatrixContaining(tensors, &name_buf, layer, "attn_k.weight", values.embedding_length, k_width);
+        if (sliding) {
+            try expectLayerMatrixContaining(tensors, &name_buf, layer, "attn_v.weight", values.embedding_length, v_width);
+        } else if (layerTensorBySuffixOptional(tensors, &name_buf, layer, "attn_v.weight") != null) {
+            return error.ShapeMismatch;
+        }
+        try expectLayerMatrixContaining(tensors, &name_buf, layer, "attn_output.weight", values.embedding_length, q_width);
         try expectLayerVector(tensors, &name_buf, layer, "ffn_norm.weight", values.embedding_length);
         try expectLayerMatrixContaining(tensors, &name_buf, layer, "ffn_gate.weight", values.embedding_length, values.feed_forward_length);
         try expectLayerMatrixContaining(tensors, &name_buf, layer, "ffn_up.weight", values.embedding_length, values.feed_forward_length);
         try expectLayerMatrixContaining(tensors, &name_buf, layer, "ffn_down.weight", values.embedding_length, values.feed_forward_length);
+        try expectLayerVector(tensors, &name_buf, layer, "post_attention_norm.weight", values.embedding_length);
+        try expectLayerVector(tensors, &name_buf, layer, "post_ffw_norm.weight", values.embedding_length);
+        try expectLayerVector(tensors, &name_buf, layer, "layer_output_scale.weight", 1);
     }
+}
+
+fn validateOfficialGemma4_12bSpec(spec: ModelSpec) ModelError!void {
+    if (!looksLikeOfficialGemma4_12b(spec)) return;
+    try expectOptionalU32(spec.block_count, 48);
+    try expectOptionalU32(spec.context_length, 262144);
+    try expectOptionalU32(spec.embedding_length, 3840);
+    try expectOptionalU32(spec.feed_forward_length, 15360);
+    try expectOptionalU32(spec.attention_head_count, 16);
+    try expectOptionalU32(spec.rope_dimension_count, 512);
+    try expectOptionalU32(spec.rope_dimension_count_swa, 256);
+    try expectOptionalU32(spec.attention_key_length, 512);
+    try expectOptionalU32(spec.attention_value_length, 512);
+    try expectOptionalU32(spec.attention_key_length_swa, 256);
+    try expectOptionalU32(spec.attention_value_length_swa, 256);
+    try expectOptionalU32(spec.vocab_size, 262144);
+
+    const block_count = spec.block_count orelse return error.MissingMetadata;
+    const block_count_usize = std.math.cast(usize, block_count) orelse return error.MalformedModel;
+    const kv_heads = spec.attention_head_count_kv_per_layer orelse return error.MissingMetadata;
+    const sliding_pattern = spec.sliding_window_pattern orelse return error.MissingMetadata;
+    if (kv_heads.len != block_count_usize or sliding_pattern.len != block_count_usize) return error.MissingMetadata;
+    for (0..block_count_usize) |layer| {
+        const expected_sliding = ((layer + 1) % 6) != 0;
+        if (sliding_pattern[layer] != expected_sliding) return error.MalformedModel;
+        const expected_kv_heads: u32 = if (expected_sliding) 8 else 1;
+        if (kv_heads[layer] != expected_kv_heads) return error.MalformedModel;
+    }
+}
+
+fn looksLikeOfficialGemma4_12b(spec: ModelSpec) bool {
+    return spec.block_count == 48 or
+        spec.embedding_length == 3840 or
+        spec.vocab_size == 262144;
+}
+
+fn expectOptionalU32(value: ?u32, expected: u32) ModelError!void {
+    if (value == null) return error.MissingMetadata;
+    if (value.? != expected) return error.MalformedModel;
 }
 
 fn hasTensor(tensors: []const TensorInfo, name: []const u8) bool {
@@ -275,54 +420,26 @@ fn layerTensorBySuffix(tensors: []const TensorInfo, name_buf: []u8, layer: usize
     return tensorByName(tensors, name) orelse error.MissingTensor;
 }
 
-fn expectLayerVector(tensors: []const TensorInfo, name_buf: []u8, layer: usize, suffix: []const u8, expected: u32) ModelError!void {
-    try expectVector(try layerTensorBySuffix(tensors, name_buf, layer, suffix), expected);
+fn layerTensorBySuffixOptional(tensors: []const TensorInfo, name_buf: []u8, layer: usize, suffix: []const u8) ?TensorInfo {
+    const name = std.fmt.bufPrint(name_buf, "blk.{d}.{s}", .{ layer, suffix }) catch return null;
+    return tensorByName(tensors, name);
 }
 
-fn expectLayerMatrixHiddenHidden(tensors: []const TensorInfo, name_buf: []u8, layer: usize, suffix: []const u8, hidden: u32) ModelError!void {
-    try expectMatrixExact(try layerTensorBySuffix(tensors, name_buf, layer, suffix), hidden, hidden);
+fn expectLayerVector(tensors: []const TensorInfo, name_buf: []u8, layer: usize, suffix: []const u8, expected: u32) ModelError!void {
+    try expectVector(try layerTensorBySuffix(tensors, name_buf, layer, suffix), expected);
 }
 
 fn expectLayerMatrixContaining(tensors: []const TensorInfo, name_buf: []u8, layer: usize, suffix: []const u8, a: u32, b: u32) ModelError!void {
     try expectMatrixContaining(try layerTensorBySuffix(tensors, name_buf, layer, suffix), a, b);
 }
 
-fn expectLayerKvMatrix(
-    tensors: []const TensorInfo,
-    name_buf: []u8,
-    layer: usize,
-    suffix: []const u8,
-    hidden: u32,
-    kv_width: ?u32,
-) ModelError!void {
-    const tensor = try layerTensorBySuffix(tensors, name_buf, layer, suffix);
-    if (kv_width) |width| {
-        try expectMatrixContaining(tensor, hidden, width);
-    } else {
-        try expectMatrixWithDim(tensor, hidden);
-    }
-}
-
 fn expectVector(tensor: TensorInfo, len: u32) ModelError!void {
     if (tensor.dims.len != 1 or tensor.dims[0] != len) return error.ShapeMismatch;
-}
-
-fn expectMatrixExact(tensor: TensorInfo, rows_or_cols_a: u32, rows_or_cols_b: u32) ModelError!void {
-    if (tensor.dims.len != 2) return error.ShapeMismatch;
-    const a = @as(u64, rows_or_cols_a);
-    const b = @as(u64, rows_or_cols_b);
-    if (!((tensor.dims[0] == a and tensor.dims[1] == b) or (tensor.dims[0] == b and tensor.dims[1] == a))) {
-        return error.ShapeMismatch;
-    }
 }
 
 fn expectMatrixContaining(tensor: TensorInfo, a: u32, b: u32) ModelError!void {
     if (tensor.dims.len != 2) return error.ShapeMismatch;
     if (!dimsContain(tensor.dims, a) or !dimsContain(tensor.dims, b)) return error.ShapeMismatch;
-}
-
-fn expectMatrixWithDim(tensor: TensorInfo, expected: u32) ModelError!void {
-    if (tensor.dims.len != 2 or !dimsContain(tensor.dims, expected)) return error.ShapeMismatch;
 }
 
 fn dimsContain(dims: []const u64, expected: u32) bool {
@@ -342,6 +459,11 @@ pub fn tensorByteLen(kind: QuantizationType, element_count: u64) ModelError!u64 
             const blocks = (element_count + 31) / 32;
             break :blk std.math.mul(u64, blocks, 18) catch error.MalformedModel;
         },
+        .q6_k => blk: {
+            if (element_count == 0) return error.MalformedModel;
+            const blocks = (element_count + 255) / 256;
+            break :blk std.math.mul(u64, blocks, 210) catch error.MalformedModel;
+        },
         .unknown => error.UnsupportedQuantization,
     };
 }
@@ -350,14 +472,19 @@ test "quantization labels and support" {
     try std.testing.expectEqual(QuantizationType.f32, QuantizationType.fromGgmlType(0));
     try std.testing.expectEqual(QuantizationType.f16, QuantizationType.fromGgmlType(1));
     try std.testing.expectEqual(QuantizationType.q4_0, QuantizationType.fromGgmlType(2));
+    try std.testing.expectEqual(QuantizationType.q6_k, QuantizationType.fromGgmlType(14));
     try std.testing.expectEqual(QuantizationType.unknown, QuantizationType.fromGgmlType(999));
     try std.testing.expect(QuantizationType.q4_0.isSupported());
+    try std.testing.expect(QuantizationType.q6_k.isSupported());
     try std.testing.expect(!QuantizationType.unknown.isSupported());
+    try std.testing.expectEqualStrings("Q6_K", QuantizationType.q6_k.label());
 }
 
-test "tensor byte length supports q4_0 blocks" {
+test "tensor byte length supports quantized blocks" {
     try std.testing.expectEqual(@as(u64, 18), try tensorByteLen(.q4_0, 32));
     try std.testing.expectEqual(@as(u64, 36), try tensorByteLen(.q4_0, 33));
+    try std.testing.expectEqual(@as(u64, 210), try tensorByteLen(.q6_k, 256));
+    try std.testing.expectEqual(@as(u64, 420), try tensorByteLen(.q6_k, 257));
 }
 
 test "Gemma 4 text spec validator requires target architecture and q4_0" {
@@ -386,13 +513,18 @@ test "Gemma 4 text tensor validator checks required families" {
         tensorInfo("output_norm.weight"),
         tensorInfo("blk.0.attn_norm.weight"),
         tensorInfo("blk.0.attn_q.weight"),
+        tensorInfo("blk.0.attn_q_norm.weight"),
         tensorInfo("blk.0.attn_k.weight"),
+        tensorInfo("blk.0.attn_k_norm.weight"),
         tensorInfo("blk.0.attn_v.weight"),
         tensorInfo("blk.0.attn_output.weight"),
         tensorInfo("blk.0.ffn_norm.weight"),
         tensorInfo("blk.0.ffn_gate.weight"),
         tensorInfo("blk.0.ffn_up.weight"),
         tensorInfo("blk.0.ffn_down.weight"),
+        tensorInfo("blk.0.post_attention_norm.weight"),
+        tensorInfo("blk.0.post_ffw_norm.weight"),
+        tensorInfo("blk.0.layer_output_scale.weight"),
     };
     try validateGemma4TextTensors(&tensors);
 
@@ -405,22 +537,32 @@ test "Gemma 4 text model validator checks every layer and shapes" {
         tensorInfoDims("output_norm.weight", &.{4}),
         tensorInfoDims("blk.0.attn_norm.weight", &.{4}),
         tensorInfoDims("blk.0.attn_q.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.0.attn_q_norm.weight", &.{2}),
         tensorInfoDims("blk.0.attn_k.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.0.attn_k_norm.weight", &.{2}),
         tensorInfoDims("blk.0.attn_v.weight", &.{ 2, 4 }),
         tensorInfoDims("blk.0.attn_output.weight", &.{ 4, 4 }),
         tensorInfoDims("blk.0.ffn_norm.weight", &.{4}),
         tensorInfoDims("blk.0.ffn_gate.weight", &.{ 8, 4 }),
         tensorInfoDims("blk.0.ffn_up.weight", &.{ 8, 4 }),
         tensorInfoDims("blk.0.ffn_down.weight", &.{ 4, 8 }),
+        tensorInfoDims("blk.0.post_attention_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.post_ffw_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.layer_output_scale.weight", &.{1}),
         tensorInfoDims("blk.1.attn_norm.weight", &.{4}),
         tensorInfoDims("blk.1.attn_q.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.1.attn_q_norm.weight", &.{2}),
         tensorInfoDims("blk.1.attn_k.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.1.attn_k_norm.weight", &.{2}),
         tensorInfoDims("blk.1.attn_v.weight", &.{ 2, 4 }),
         tensorInfoDims("blk.1.attn_output.weight", &.{ 4, 4 }),
         tensorInfoDims("blk.1.ffn_norm.weight", &.{4}),
         tensorInfoDims("blk.1.ffn_gate.weight", &.{ 8, 4 }),
         tensorInfoDims("blk.1.ffn_up.weight", &.{ 8, 4 }),
         tensorInfoDims("blk.1.ffn_down.weight", &.{ 4, 8 }),
+        tensorInfoDims("blk.1.post_attention_norm.weight", &.{4}),
+        tensorInfoDims("blk.1.post_ffw_norm.weight", &.{4}),
+        tensorInfoDims("blk.1.layer_output_scale.weight", &.{1}),
     };
     try validateGemma4TextModel(validGemma4Spec(2), &tensors);
 
@@ -430,19 +572,59 @@ test "Gemma 4 text model validator checks every layer and shapes" {
     ));
 }
 
-test "Gemma 4 text model validator rejects bad top-level and layer shapes" {
-    const bad_embedding = [_]TensorInfo{
-        tensorInfoDims("token_embd.weight", &.{ 8, 5 }),
+test "Gemma 4 text validator accepts full k-equals-v layers without v projection" {
+    const tensors = [_]TensorInfo{
+        tensorInfoDims("token_embd.weight", &.{ 8, 4 }),
         tensorInfoDims("output_norm.weight", &.{4}),
         tensorInfoDims("blk.0.attn_norm.weight", &.{4}),
         tensorInfoDims("blk.0.attn_q.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.0.attn_q_norm.weight", &.{2}),
         tensorInfoDims("blk.0.attn_k.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.0.attn_k_norm.weight", &.{2}),
         tensorInfoDims("blk.0.attn_v.weight", &.{ 2, 4 }),
         tensorInfoDims("blk.0.attn_output.weight", &.{ 4, 4 }),
         tensorInfoDims("blk.0.ffn_norm.weight", &.{4}),
         tensorInfoDims("blk.0.ffn_gate.weight", &.{ 8, 4 }),
         tensorInfoDims("blk.0.ffn_up.weight", &.{ 8, 4 }),
         tensorInfoDims("blk.0.ffn_down.weight", &.{ 4, 8 }),
+        tensorInfoDims("blk.0.post_attention_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.post_ffw_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.layer_output_scale.weight", &.{1}),
+        tensorInfoDims("blk.1.attn_norm.weight", &.{4}),
+        tensorInfoDims("blk.1.attn_q.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.1.attn_q_norm.weight", &.{4}),
+        tensorInfoDims("blk.1.attn_k.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.1.attn_k_norm.weight", &.{4}),
+        tensorInfoDims("blk.1.attn_output.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.1.ffn_norm.weight", &.{4}),
+        tensorInfoDims("blk.1.ffn_gate.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.1.ffn_up.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.1.ffn_down.weight", &.{ 4, 8 }),
+        tensorInfoDims("blk.1.post_attention_norm.weight", &.{4}),
+        tensorInfoDims("blk.1.post_ffw_norm.weight", &.{4}),
+        tensorInfoDims("blk.1.layer_output_scale.weight", &.{1}),
+    };
+    try validateGemma4TextModel(validMixedGemma4Spec(), &tensors);
+}
+
+test "Gemma 4 text model validator rejects bad top-level and layer shapes" {
+    const bad_embedding = [_]TensorInfo{
+        tensorInfoDims("token_embd.weight", &.{ 8, 5 }),
+        tensorInfoDims("output_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.attn_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.attn_q.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.0.attn_q_norm.weight", &.{2}),
+        tensorInfoDims("blk.0.attn_k.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.0.attn_k_norm.weight", &.{2}),
+        tensorInfoDims("blk.0.attn_v.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.0.attn_output.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.0.ffn_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.ffn_gate.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.0.ffn_up.weight", &.{ 8, 4 }),
+        tensorInfoDims("blk.0.ffn_down.weight", &.{ 4, 8 }),
+        tensorInfoDims("blk.0.post_attention_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.post_ffw_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.layer_output_scale.weight", &.{1}),
     };
     try std.testing.expectError(error.ShapeMismatch, validateGemma4TextModel(validGemma4Spec(1), &bad_embedding));
 
@@ -451,13 +633,18 @@ test "Gemma 4 text model validator rejects bad top-level and layer shapes" {
         tensorInfoDims("output_norm.weight", &.{4}),
         tensorInfoDims("blk.0.attn_norm.weight", &.{ 4, 1 }),
         tensorInfoDims("blk.0.attn_q.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.0.attn_q_norm.weight", &.{2}),
         tensorInfoDims("blk.0.attn_k.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.0.attn_k_norm.weight", &.{2}),
         tensorInfoDims("blk.0.attn_v.weight", &.{ 2, 4 }),
         tensorInfoDims("blk.0.attn_output.weight", &.{ 4, 4 }),
         tensorInfoDims("blk.0.ffn_norm.weight", &.{4}),
         tensorInfoDims("blk.0.ffn_gate.weight", &.{ 8, 4 }),
         tensorInfoDims("blk.0.ffn_up.weight", &.{ 8, 4 }),
         tensorInfoDims("blk.0.ffn_down.weight", &.{ 4, 8 }),
+        tensorInfoDims("blk.0.post_attention_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.post_ffw_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.layer_output_scale.weight", &.{1}),
     };
     try std.testing.expectError(error.ShapeMismatch, validateGemma4TextModel(validGemma4Spec(1), &bad_norm));
 
@@ -466,13 +653,18 @@ test "Gemma 4 text model validator rejects bad top-level and layer shapes" {
         tensorInfoDims("output_norm.weight", &.{4}),
         tensorInfoDims("blk.0.attn_norm.weight", &.{4}),
         tensorInfoDims("blk.0.attn_q.weight", &.{ 4, 4 }),
+        tensorInfoDims("blk.0.attn_q_norm.weight", &.{2}),
         tensorInfoDims("blk.0.attn_k.weight", &.{ 2, 4 }),
+        tensorInfoDims("blk.0.attn_k_norm.weight", &.{2}),
         tensorInfoDims("blk.0.attn_v.weight", &.{ 2, 4 }),
         tensorInfoDims("blk.0.attn_output.weight", &.{ 4, 4 }),
         tensorInfoDims("blk.0.ffn_norm.weight", &.{4}),
         tensorInfoDims("blk.0.ffn_gate.weight", &.{ 7, 4 }),
         tensorInfoDims("blk.0.ffn_up.weight", &.{ 8, 4 }),
         tensorInfoDims("blk.0.ffn_down.weight", &.{ 4, 8 }),
+        tensorInfoDims("blk.0.post_attention_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.post_ffw_norm.weight", &.{4}),
+        tensorInfoDims("blk.0.layer_output_scale.weight", &.{1}),
     };
     try std.testing.expectError(error.ShapeMismatch, validateGemma4TextModel(validGemma4Spec(1), &bad_ffn));
 }
@@ -509,6 +701,28 @@ fn validGemma4Spec(block_count: u32) ModelSpec {
         .rope_dimension_count = 2,
         .vocab_size = 8,
         .tensor_count = 2 + (@as(usize, block_count) * 9),
+        .quantization = .{ .has_q4_0 = true },
+    };
+}
+
+fn validMixedGemma4Spec() ModelSpec {
+    return .{
+        .architecture = "gemma4",
+        .context_length = 16,
+        .embedding_length = 4,
+        .block_count = 2,
+        .feed_forward_length = 8,
+        .attention_head_count = 2,
+        .attention_head_count_kv_per_layer = &.{ 1, 1 },
+        .rope_dimension_count = 4,
+        .rope_dimension_count_swa = 2,
+        .attention_key_length = 4,
+        .attention_value_length = 4,
+        .attention_key_length_swa = 2,
+        .attention_value_length_swa = 2,
+        .sliding_window_pattern = &.{ true, false },
+        .vocab_size = 8,
+        .tensor_count = 29,
         .quantization = .{ .has_q4_0 = true },
     };
 }
