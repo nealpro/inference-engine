@@ -5,3 +5,4 @@ models/
 benchmarks/runs/
 *.gguf
 *.safetensors
+data/
