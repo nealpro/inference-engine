@@ -3,6 +3,7 @@
 const std = @import("std");
 
 const artifact = @import("artifact.zig");
+const backend = @import("backend.zig");
 const benchmark = @import("benchmark.zig");
 const gguf = @import("gguf.zig");
 const model = @import("model.zig");
@@ -18,6 +19,7 @@ pub const CliError = error{
     InvalidContextLength,
     InvalidMaxNewTokens,
     UnknownDecodeMode,
+    UnknownBackend,
     ConflictingBenchmarkOutput,
     InvalidArtifactRevision,
 };
@@ -33,7 +35,7 @@ pub const RuntimeError = error{
     InvalidModelPath,
     AmbiguousModelDirectory,
     ProjectorModelNotSupported,
-} || gguf.GgufError || error{
+} || backend.BackendError || gguf.GgufError || error{
     OutOfMemory,
     PermissionDenied,
     AccessDenied,
@@ -92,15 +94,22 @@ pub const RunOptions = struct {
     max_new_tokens: u32 = 128,
     artifact_revision: ?[]const u8 = null,
     decode_mode: DecodeMode = .ar,
+    backend: backend.Backend = .auto,
     show_benchmark_contract: bool = false,
     show_benchmark_contract_json: bool = false,
     show_benchmark_report_json: bool = false,
     validate_model: bool = false,
+    compute_sha256: bool = false,
 
     /// Parses CLI arguments after the executable name.
     pub fn parse(args: []const []const u8) CliError!RunOptions {
-        var opts = RunOptions{};
-        var saw_prompt = false;
+        return parseWithDefaults(.{}, args);
+    }
+
+    /// Parses CLI arguments over an existing set of config-provided defaults.
+    pub fn parseWithDefaults(defaults: RunOptions, args: []const []const u8) CliError!RunOptions {
+        var opts = defaults;
+        var saw_prompt = defaults.prompt.len != 0;
         var index: usize = 0;
 
         while (index < args.len) {
@@ -127,6 +136,8 @@ pub const RunOptions = struct {
                 opts.artifact_revision = try parseArtifactRevision(try nextValue(args, &index));
             } else if (std.mem.eql(u8, arg, "--decode")) {
                 opts.decode_mode = try DecodeMode.parse(try nextValue(args, &index));
+            } else if (std.mem.eql(u8, arg, "--backend")) {
+                opts.backend = backend.Backend.parse(try nextValue(args, &index)) catch return error.UnknownBackend;
             } else if (std.mem.eql(u8, arg, "--benchmark-contract")) {
                 opts.show_benchmark_contract = true;
             } else if (std.mem.eql(u8, arg, "--benchmark-contract-json")) {
@@ -135,6 +146,8 @@ pub const RunOptions = struct {
                 opts.show_benchmark_report_json = true;
             } else if (std.mem.eql(u8, arg, "--validate-model")) {
                 opts.validate_model = true;
+            } else if (std.mem.eql(u8, arg, "--sha256")) {
+                opts.compute_sha256 = true;
             } else {
                 return error.InvalidArgument;
             }
@@ -169,7 +182,7 @@ fn nextValue(args: []const []const u8, index: *usize) CliError![]const u8 {
     return value;
 }
 
-fn parseArtifactRevision(value: []const u8) CliError![]const u8 {
+pub fn parseArtifactRevision(value: []const u8) CliError![]const u8 {
     if (value.len == 0 or std.mem.eql(u8, value, "main")) return error.InvalidArtifactRevision;
     return value;
 }
@@ -200,10 +213,13 @@ pub const Engine = struct {
         if (options.decode_mode != .ar) return error.DecodeModeNotImplemented;
 
         try self.validateModel(allocator, io, env, writer, options);
-        try writer.writeAll(
-            "\nreal-weight CPU generation is not wired to external GGUF tensors yet; CPU reference kernels are fixture-backed in tests\n",
+        const selected_backend = try backend.select(options.backend);
+        try backend.cuda.ensureKernelLaunchWorks();
+        try writer.print(
+            "\nbackend: {s}\nGPU Gemma 4 execution is not implemented yet; CPU transformer inference is intentionally not a fallback\n",
+            .{selected_backend.label()},
         );
-        return error.RealModelCpuExecutionNotImplemented;
+        return error.GpuInferenceNotImplemented;
     }
 
     /// Validates model artifact identity, metadata, tensors, and tokenizer data.
@@ -216,7 +232,7 @@ pub const Engine = struct {
         options: RunOptions,
     ) !void {
         _ = self;
-        var ctx = try loadValidationContext(allocator, io, env, options);
+        var ctx = try loadValidationContext(allocator, io, env, options, options.compute_sha256);
         defer ctx.deinit(allocator);
 
         const formatted_prompt = try ctx.tokenizer.applySingleUserChatTemplate(allocator, options.prompt);
@@ -229,7 +245,6 @@ pub const Engine = struct {
             \\model-path: {s}
             \\target-repo: {s}
             \\target-file: {s}
-            \\artifact-sha256: {s}
             \\artifact-revision-status: {s}
             \\architecture: {s}
             \\
@@ -240,11 +255,11 @@ pub const Engine = struct {
                 ctx.resolved.model_path,
                 benchmark.target_artifact.hf_repo,
                 benchmark.target_artifact.filename,
-                &ctx.artifact_sha256,
                 artifactRevisionStatus(options),
                 ctx.spec.architecture,
             },
         );
+        if (ctx.artifact_sha256) |sha256| try writer.print("artifact-sha256: {s}\n", .{&sha256});
         if (options.artifact_revision) |revision| try writer.print("artifact-revision: {s}\n", .{revision});
         if (ctx.spec.name) |name| try writer.print("name: {s}\n", .{name});
         if (ctx.spec.context_length) |value| try writer.print("context-length: {d}\n", .{value});
@@ -277,8 +292,9 @@ pub const Engine = struct {
         options: RunOptions,
     ) !void {
         _ = self;
-        var ctx = try loadValidationContext(allocator, io, env, options);
+        var ctx = try loadValidationContext(allocator, io, env, options, true);
         defer ctx.deinit(allocator);
+        const artifact_sha256 = ctx.artifact_sha256 orelse return error.Unexpected;
 
         const prompt_bytes = try allocator.alloc(usize, benchmark.prompt_suite.len);
         defer allocator.free(prompt_bytes);
@@ -291,7 +307,7 @@ pub const Engine = struct {
         try benchmark.writeReportJson(writer, .{
             .model_path = ctx.resolved.model_path,
             .model_source = @tagName(ctx.resolved.source),
-            .artifact_sha256 = &ctx.artifact_sha256,
+            .artifact_sha256 = &artifact_sha256,
             .artifact_revision = options.artifact_revision,
             .artifact_revision_status = artifactRevisionStatus(options),
             .spec = ctx.spec,
@@ -311,7 +327,7 @@ const ValidationContext = struct {
     parsed: gguf.ParsedGguf,
     spec: model.ModelSpec,
     tokenizer: tokenizer.Tokenizer,
-    artifact_sha256: artifact.Sha256Hex,
+    artifact_sha256: ?artifact.Sha256Hex,
     chat_template_source: []const u8,
 
     fn deinit(self: *ValidationContext, allocator: std.mem.Allocator) void {
@@ -327,11 +343,15 @@ fn loadValidationContext(
     io: std.Io,
     env: resolver.Env,
     options: RunOptions,
+    compute_sha256: bool,
 ) !ValidationContext {
     var resolved = try resolver.resolve(allocator, io, options.model_path, options.tokenizer_path, env);
     errdefer resolved.deinit(allocator);
 
-    const artifact_sha256 = try artifact.sha256FileHex(io, resolved.model_path);
+    const artifact_sha256: ?artifact.Sha256Hex = if (compute_sha256)
+        try artifact.sha256FileHex(io, resolved.model_path)
+    else
+        null;
 
     var parsed = try gguf.parseFromPath(allocator, io, resolved.model_path);
     errdefer parsed.deinit(allocator);
@@ -413,7 +433,53 @@ test "CLI validation requires model but not prompt" {
     const args = &[_][]const u8{ "--validate-model", "--model", "toy" };
     const opts = try RunOptions.parse(args);
     try std.testing.expect(opts.validate_model);
+    try std.testing.expect(!opts.compute_sha256);
     try std.testing.expectEqualStrings("toy", opts.model_path.?);
+}
+
+test "CLI validation accepts opt-in sha256" {
+    const args = &[_][]const u8{ "--validate-model", "--model", "toy", "--sha256" };
+    const opts = try RunOptions.parse(args);
+    try std.testing.expect(opts.validate_model);
+    try std.testing.expect(opts.compute_sha256);
+    try std.testing.expectEqualStrings("toy", opts.model_path.?);
+}
+
+test "CLI arguments override config defaults" {
+    const defaults = RunOptions{
+        .model_path = "config-model.gguf",
+        .prompt = "config prompt",
+        .context_length = 1024,
+        .max_new_tokens = 8,
+        .backend = .cuda,
+    };
+    const args = &[_][]const u8{
+        "--model",
+        "cli-model.gguf",
+        "--prompt",
+        "cli prompt",
+        "--ctx",
+        "2048",
+    };
+
+    const opts = try RunOptions.parseWithDefaults(defaults, args);
+
+    try std.testing.expectEqualStrings("cli-model.gguf", opts.model_path.?);
+    try std.testing.expectEqualStrings("cli prompt", opts.prompt);
+    try std.testing.expectEqual(@as(u32, 2048), opts.context_length);
+    try std.testing.expectEqual(@as(u32, 8), opts.max_new_tokens);
+    try std.testing.expectEqual(backend.Backend.cuda, opts.backend);
+}
+
+test "config prompt satisfies real inference prompt requirement" {
+    const defaults = RunOptions{
+        .model_path = "config-model.gguf",
+        .prompt = "config prompt",
+    };
+    const opts = try RunOptions.parseWithDefaults(defaults, &.{});
+
+    try std.testing.expectEqualStrings("config-model.gguf", opts.model_path.?);
+    try std.testing.expectEqualStrings("config prompt", opts.prompt);
 }
 
 test "CLI argument parsing accepts scaffold flags" {
@@ -424,6 +490,8 @@ test "CLI argument parsing accepts scaffold flags" {
         "8192",
         "--decode",
         "ar",
+        "--backend",
+        "cuda",
         "--prompt",
         "hello",
     };
@@ -434,6 +502,12 @@ test "CLI argument parsing accepts scaffold flags" {
     try std.testing.expectEqualStrings("hello", opts.prompt);
     try std.testing.expectEqual(@as(u32, 8192), opts.context_length);
     try std.testing.expectEqual(DecodeMode.ar, opts.decode_mode);
+    try std.testing.expectEqual(backend.Backend.cuda, opts.backend);
+}
+
+test "CLI rejects unknown backend" {
+    const args = &[_][]const u8{ "--model", "toy", "--prompt", "hello", "--backend", "cpu" };
+    try std.testing.expectError(error.UnknownBackend, RunOptions.parse(args));
 }
 
 test "CLI argument parsing accepts benchmark contract without model" {
@@ -487,6 +561,68 @@ test "CLI rejects floating artifact revision" {
 test "CLI rejects empty artifact revision" {
     const args = &[_][]const u8{ "--validate-model", "--model", "toy", "--artifact-revision", "" };
     try std.testing.expectError(error.InvalidArtifactRevision, RunOptions.parse(args));
+}
+
+test "validation skips artifact sha256 by default" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const bytes = try fixtureGemma4Gguf(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+
+    var file = try tmp.dir.createFile(io, benchmark.target_artifact.filename, .{ .read = true });
+    try file.writePositionalAll(io, bytes, 0);
+    file.close(io);
+
+    const path = try std.Io.Dir.path.join(
+        std.testing.allocator,
+        &.{ ".zig-cache", "tmp", &tmp.sub_path, benchmark.target_artifact.filename },
+    );
+    defer std.testing.allocator.free(path);
+
+    var out: [20000]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&out);
+    try Engine.init().run(std.testing.allocator, io, .{}, &writer, .{
+        .model_path = path,
+        .validate_model = true,
+    });
+
+    const text = out[0..writer.end];
+    try std.testing.expect(std.mem.indexOf(u8, text, "model validation: ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "artifact-sha256:") == null);
+}
+
+test "validation prints artifact sha256 when requested" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const bytes = try fixtureGemma4Gguf(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+
+    var file = try tmp.dir.createFile(io, benchmark.target_artifact.filename, .{ .read = true });
+    try file.writePositionalAll(io, bytes, 0);
+    file.close(io);
+
+    const path = try std.Io.Dir.path.join(
+        std.testing.allocator,
+        &.{ ".zig-cache", "tmp", &tmp.sub_path, benchmark.target_artifact.filename },
+    );
+    defer std.testing.allocator.free(path);
+
+    const expected_sha = try artifact.sha256FileHex(io, path);
+    var out: [20000]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&out);
+    try Engine.init().run(std.testing.allocator, io, .{}, &writer, .{
+        .model_path = path,
+        .validate_model = true,
+        .compute_sha256 = true,
+    });
+
+    const text = out[0..writer.end];
+    try std.testing.expect(std.mem.indexOf(u8, text, "artifact-sha256:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, &expected_sha) != null);
 }
 
 test "benchmark report json validates fixture GGUF without generation" {

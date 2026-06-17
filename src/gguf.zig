@@ -123,6 +123,19 @@ pub const ParsedGguf = struct {
         return null;
     }
 
+    /// Returns a boolean metadata value by key when present.
+    pub fn metadataBool(self: ParsedGguf, key: []const u8) ?bool {
+        for (self.metadata) |entry| {
+            if (std.mem.eql(u8, entry.key, key)) {
+                return switch (entry.value) {
+                    .bool => |value| value,
+                    else => null,
+                };
+            }
+        }
+        return null;
+    }
+
     /// Returns a string-array metadata value by key when present.
     pub fn metadataStringArray(self: ParsedGguf, key: []const u8) ?[]const []const u8 {
         for (self.metadata) |entry| {

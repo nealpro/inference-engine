@@ -4,8 +4,12 @@ const std = @import("std");
 
 /// Artifact identity helpers.
 pub const artifact = @import("artifact.zig");
+/// Runtime backend selection and availability probing.
+pub const backend = @import("backend.zig");
 /// Benchmark contract and report writers.
 pub const benchmark = @import("benchmark.zig");
+/// User configuration loading for reusable CLI defaults.
+pub const config = @import("config.zig");
 /// Fixture-backed CPU reference kernels.
 pub const cpu = @import("cpu.zig");
 /// CLI options and top-level engine orchestration.
@@ -30,7 +34,9 @@ pub const RunOptions = engine.RunOptions;
 
 test {
     _ = artifact;
+    _ = backend;
     _ = benchmark;
+    _ = config;
     _ = cpu;
     _ = engine;
     _ = gguf;
